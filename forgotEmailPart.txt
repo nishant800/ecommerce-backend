@@ -1,0 +1,65 @@
+    static async forgotEmail(
+        phone: string,
+    ) {
+        const normalizedPhone =
+            phone.trim();
+
+        console.log(
+            "================================",
+        );
+
+        console.log(
+            "🔐 FORGOT EMAIL REQUEST",
+        );
+
+        console.log(
+            "Phone:",
+            normalizedPhone,
+        );
+
+        const user = await User.findOne({
+            phone: normalizedPhone,
+        }).select(
+            "+forgotEmailOTP +forgotEmailOTPExpires",
+        );
+
+        if (!user) {
+            throw new Error(
+                "No account found with this phone number",
+            );
+        }
+
+        const otp = crypto
+            .randomInt(100000, 1000000)
+            .toString();
+
+        user.forgotEmailOTP = otp;
+
+        user.forgotEmailOTPExpires =
+            new Date(
+                Date.now() +
+                10 * 60 * 1000,
+            );
+
+        await user.save();
+
+        console.log(
+            "✅ Account recovery OTP saved",
+        );
+
+        await sendForgotEmailOTP(
+            user.email,
+            otp,
+        );
+
+        console.log(
+            "✅ Account recovery OTP sent",
+        );
+
+        return {
+            message:
+                "A verification OTP has been sent to your registered email.",
+        };
+    }
+
+    static async verifyForgotEmailOTP(
