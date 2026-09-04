@@ -382,34 +382,336 @@ export class SellerService {
     ) {
 
         const allowedStatuses = [
-
             "pending",
-
             "shipped",
-
             "delivered",
-
             "cancelled",
-
         ];
 
-
-        if (
-            !allowedStatuses.includes(
-                status
-            )
-        ) {
-
-            throw new Error(
-                "Invalid order status"
-            );
+        if (!allowedStatuses.includes(status)) {
+            throw new Error("Invalid order status");
         }
 
-
         const sellerObjectId =
-            new mongoose.Types.ObjectId(
-                sellerId
-            );
+            new mongoose.Types.ObjectId(sellerId);
+
+
+        // =====================================
+        // CANCEL ORDER + RESTORE STOCK
+        // =====================================
+
+        if (status === "cancelled") {
+
+            const session = await mongoose.startSession();
+
+            try {
+
+                let updatedOrder: any = null;
+
+                await session.withTransaction(async () => {
+
+                    // Atomically cancel the order.
+                    // This also prevents restoring stock twice
+                    // when the same order is cancelled again.
+                    updatedOrder =
+                        await Order.findOneAndUpdate(
+
+                            {
+                                _id: orderId,
+                                "items.seller":
+                                    sellerObjectId,
+
+                                orderStatus: {
+                                    $ne: "cancelled",
+                                },
+                            },
+
+                            {
+                                $set: {
+                                    orderStatus:
+                                        "cancelled",
+                                },
+                            },
+
+                            {
+                                new: true,
+                                session,
+                            }
+                        );
+
+                    if (!updatedOrder) {
+                        throw new Error(
+                            "Order not found or already cancelled."
+                        );
+                    }
+
+
+                    // =====================================
+                    // RESTORE PRODUCT STOCK
+                    // =====================================
+
+                    for (
+                        const item of updatedOrder.items
+                    ) {
+
+                        const quantity =
+                            Number(item.quantity);
+
+                        if (quantity <= 0) {
+                            continue;
+                        }
+
+
+                        const product =
+                            await Product.findById(
+                                item.product
+                            ).session(session);
+
+                        if (!product) {
+                            throw new Error(
+                                `Product not found: ${item.product}`
+                            );
+                        }
+
+
+                        // =====================================
+                        // VARIANT STOCK
+                        // =====================================
+
+                        if (item.variant?.sku) {
+
+                            const selectedVariant =
+                                product.variants?.find(
+                                    (variant: any) =>
+                                        String(variant.sku) ===
+                                        String(item.variant.sku)
+                                );
+
+                            if (!selectedVariant) {
+                                throw new Error(
+                                    `Variant not found for product ${product._id}`
+                                );
+                            }
+
+
+                            const optionType =
+                                item.variant.optionType;
+
+                            const optionValue =
+                                item.variant.optionValue;
+
+
+                            // ---------------------------------
+                            // SIZE
+                            // ---------------------------------
+
+                            if (
+                                optionType === "size" &&
+                                optionValue
+                            ) {
+
+                                const selectedSize =
+                                    selectedVariant.sizes?.find(
+                                        (size: any) =>
+                                            String(size.value) ===
+                                            String(optionValue)
+                                    );
+
+                                if (!selectedSize) {
+                                    throw new Error(
+                                        `Size option not found for product ${product._id}`
+                                    );
+                                }
+
+                                selectedSize.stock =
+                                    Number(
+                                        selectedSize.stock || 0
+                                    ) + quantity;
+
+
+                                selectedVariant.stock =
+                                    (selectedVariant.sizes || []).reduce(
+                                        (
+                                            total: number,
+                                            size: any
+                                        ) =>
+                                            total +
+                                            Number(
+                                                size.stock || 0
+                                            ),
+                                        0
+                                    );
+                            }
+                            // ---------------------------------
+                            // SHADE
+                            // ---------------------------------
+
+                            else if (
+                                optionType === "shade" &&
+                                optionValue
+                            ) {
+
+                                const selectedShade =
+                                    selectedVariant.shades?.find(
+                                        (shade: any) =>
+                                            String(shade.value) ===
+                                            String(optionValue)
+                                    );
+
+                                if (!selectedShade) {
+                                    throw new Error(
+                                        `Shade option not found for product ${product._id}`
+                                    );
+                                }
+
+                                selectedShade.stock =
+                                    Number(
+                                        selectedShade.stock || 0
+                                    ) + quantity;
+
+
+                                selectedVariant.stock =
+                                    (selectedVariant.shades || []).reduce(
+                                        (
+                                            total: number,
+                                            shade: any
+                                        ) =>
+                                            total +
+                                            Number(
+                                                shade.stock || 0
+                                            ),
+                                        0
+                                    );
+                            }
+                            // ---------------------------------
+                            // COLOR
+                            // ---------------------------------
+
+                            else if (
+                                optionType === "color" &&
+                                optionValue
+                            ) {
+
+                                const selectedColor =
+                                    selectedVariant.colors?.find(
+                                        (color: any) =>
+                                            String(color.value) ===
+                                            String(optionValue)
+                                    );
+
+                                if (!selectedColor) {
+                                    throw new Error(
+                                        `Color option not found for product ${product._id}`
+                                    );
+                                }
+
+                                selectedColor.stock =
+                                    Number(
+                                        selectedColor.stock || 0
+                                    ) + quantity;
+
+                                selectedVariant.stock =
+                                    (selectedVariant.colors || []).reduce(
+                                        (
+                                            total: number,
+                                            color: any
+                                        ) =>
+                                            total +
+                                            Number(
+                                                color.stock || 0
+                                            ),
+                                        0
+                                    );
+                            }
+
+                            // ---------------------------------
+                            // VARIANT WITHOUT CHILD OPTION
+                            // ---------------------------------
+
+                            else {
+
+                                selectedVariant.stock =
+                                    Number(
+                                        selectedVariant.stock || 0
+                                    ) + quantity;
+                            }
+
+                        }
+
+
+                        // =====================================
+                        // NORMAL PRODUCT STOCK
+                        // =====================================
+
+                        else {
+
+                            product.stock =
+                                Number(
+                                    product.stock || 0
+                                ) + quantity;
+                        }
+
+
+                        // Save product.
+                        // Product pre-save middleware will also
+                        // synchronize total stock from variants.
+                        await product.save({
+                            session,
+                        });
+                    }
+                });
+
+
+                // =====================================
+                // CUSTOMER CANCELLATION NOTIFICATION
+                // =====================================
+
+                if (updatedOrder) {
+
+                    try {
+
+                        await NotificationService.create({
+
+                            userId:
+                                updatedOrder.user,
+
+                            recipientRole:
+                                NotificationRecipientRole.CUSTOMER,
+
+                            type:
+                                NotificationType.ORDER_CANCELLED,
+
+                            title:
+                                "Order Cancelled",
+
+                            message:
+                                `Your order #${updatedOrder._id
+                                    .toString()
+                                    .slice(-8)} has been cancelled.`,
+
+                            orderId:
+                                updatedOrder._id,
+                        });
+
+                    } catch (
+                    notificationError
+                    ) {
+
+                        console.error(
+                            "ORDER CANCELLATION NOTIFICATION ERROR:",
+                            notificationError
+                        );
+                    }
+                }
+
+
+                return updatedOrder;
+
+            } finally {
+
+                await session.endSession();
+            }
+        }
 
 
         // =====================================
@@ -417,55 +719,34 @@ export class SellerService {
         // =====================================
 
         const updateData: any = {
-
-            orderStatus:
-                status,
-
+            orderStatus: status,
         };
 
 
-        if (
-            status ===
-            "shipped"
-        ) {
+        if (status === "shipped") {
 
             updateData.shippedAt =
                 new Date();
-
         }
 
 
-        if (
-            status ===
-            "delivered"
-        ) {
+        if (status === "delivered") {
 
             updateData.deliveredAt =
                 new Date();
-
         }
 
 
         // =====================================
         // COD PAYMENT
         // =====================================
-        //
-        // Cash on Delivery becomes paid only
-        // when the seller confirms delivery.
-        //
-        // Online/Razorpay orders are not changed.
-        // =====================================
 
-        if (
-            status ===
-            "delivered"
-        ) {
+        if (status === "delivered") {
 
             const existingOrder =
                 await Order.findOne({
 
-                    _id:
-                        orderId,
+                    _id: orderId,
 
                     "items.seller":
                         sellerObjectId,
@@ -485,25 +766,17 @@ export class SellerService {
 
             const paymentMethod =
                 String(
-
                     existingOrder.paymentMethod ||
                     ""
-
                 )
                     .trim()
                     .toLowerCase();
 
 
             const isCOD =
-
-                paymentMethod ===
-                "cod" ||
-
-                paymentMethod ===
-                "cash on delivery" ||
-
-                paymentMethod ===
-                "cash_on_delivery";
+                paymentMethod === "cod" ||
+                paymentMethod === "cash on delivery" ||
+                paymentMethod === "cash_on_delivery";
 
 
             if (isCOD) {
@@ -522,27 +795,18 @@ export class SellerService {
             await Order.findOneAndUpdate(
 
                 {
-
-                    _id:
-                        orderId,
+                    _id: orderId,
 
                     "items.seller":
                         sellerObjectId,
-
                 },
 
                 {
-
-                    $set:
-                        updateData,
-
+                    $set: updateData,
                 },
 
                 {
-
-                    new:
-                        true,
-
+                    new: true,
                 }
             );
 
@@ -558,13 +822,8 @@ export class SellerService {
         // =====================================
 
         if (
-
             status === "shipped" ||
-
-            status === "delivered" ||
-
-            status === "cancelled"
-
+            status === "delivered"
         ) {
 
             try {
@@ -572,65 +831,38 @@ export class SellerService {
                 let type:
                     NotificationType;
 
-
                 let title =
                     "";
-
 
                 let message =
                     "";
 
 
-                if (
-                    status ===
-                    "shipped"
-                ) {
+                if (status === "shipped") {
 
                     type =
                         NotificationType.ORDER_SHIPPED;
 
-
                     title =
                         "Order Shipped";
-
 
                     message =
                         `Your order #${updatedOrder._id
                             .toString()
                             .slice(-8)} has been shipped.`;
 
-                } else if (
-                    status ===
-                    "delivered"
-                ) {
+                } else {
 
                     type =
                         NotificationType.ORDER_DELIVERED;
 
-
                     title =
                         "Order Delivered";
-
 
                     message =
                         `Your order #${updatedOrder._id
                             .toString()
                             .slice(-8)} has been delivered.`;
-
-                } else {
-
-                    type =
-                        NotificationType.ORDER_CANCELLED;
-
-
-                    title =
-                        "Order Cancelled";
-
-
-                    message =
-                        `Your order #${updatedOrder._id
-                            .toString()
-                            .slice(-8)} has been cancelled.`;
                 }
 
 
@@ -658,11 +890,8 @@ export class SellerService {
             ) {
 
                 console.error(
-
                     "ORDER STATUS NOTIFICATION ERROR:",
-
-                    notificationError,
-
+                    notificationError
                 );
             }
         }
@@ -670,7 +899,6 @@ export class SellerService {
 
         return updatedOrder;
     }
-
 
     // =========================================
     // MARK ORDER SHIPPED AFTER LABEL
