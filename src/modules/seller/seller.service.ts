@@ -513,10 +513,9 @@ export class SellerService {
                                 const selectedSize =
                                     selectedVariant.sizes?.find(
                                         (size: any) =>
-                                            String(size.value) ===
-                                            String(optionValue)
+                                            String(size.size).trim() ===
+                                            String(optionValue).trim()
                                     );
-
                                 if (!selectedSize) {
                                     throw new Error(
                                         `Size option not found for product ${product._id}`
@@ -554,8 +553,8 @@ export class SellerService {
                                 const selectedShade =
                                     selectedVariant.shades?.find(
                                         (shade: any) =>
-                                            String(shade.value) ===
-                                            String(optionValue)
+                                            String(shade.shade).trim().toLowerCase() ===
+                                            String(optionValue).trim().toLowerCase()
                                     );
 
                                 if (!selectedShade) {
@@ -595,8 +594,8 @@ export class SellerService {
                                 const selectedColor =
                                     selectedVariant.colors?.find(
                                         (color: any) =>
-                                            String(color.value) ===
-                                            String(optionValue)
+                                            String(color.color).trim().toLowerCase() ===
+                                            String(optionValue).trim().toLowerCase()
                                     );
 
                                 if (!selectedColor) {
