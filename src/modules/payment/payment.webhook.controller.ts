@@ -557,55 +557,11 @@ export class PaymentWebhookController {
 
                 }
 
-                const existingEventIds = Array.isArray(
-
-                    order.paymentWebhookEventIds,
-
-                )
-
-                    ? order.paymentWebhookEventIds
-
-                    : [];
-
-                if (
-
-                    eventId &&
-
-                    existingEventIds.includes(eventId)
-
-                ) {
-
-                    return res.status(200).json({
-
-                        success: true,
-
-                        message: "Duplicate payment event already processed.",
-
-                    });
-
-                }
-
-                const rememberPaymentEvent = () => {
-
-                    if (
-
-                        eventId &&
-
-                        !existingEventIds.includes(eventId)
-
-                    ) {
-
-                        order.paymentWebhookEventIds = [
-
-                            ...existingEventIds,
-
-                            eventId,
-
-                        ];
-
-                    }
-
-                };
+                // MongoDB performs the event-ID check and update atomically.
+                // No stale Mongoose document save is used for payment events.
+                const eventFilter = eventId
+                    ? { paymentWebhookEventIds: { $ne: eventId } }
+                    : {};
 
                 if (event === "payment.captured") {
 
@@ -681,17 +637,48 @@ export class PaymentWebhookController {
 
                     }
 
+                    // Do not replace an already-recorded different payment ID.
+                    const updatedOrder = await Order.findOneAndUpdate(
+                        {
+                            _id: order._id,
+                            razorpayOrderId,
+                            ...eventFilter,
+                            $or: [
+                                { razorpayPaymentId: { $exists: false } },
+                                { razorpayPaymentId: null },
+                                { razorpayPaymentId: "" },
+                                { razorpayPaymentId: paymentId },
+                            ],
+                        },
+                        {
+                            $set: {
+                                paymentStatus: PaymentStatus.SUCCESS,
+                                razorpayPaymentId: paymentId,
+                            },
+                            ...(eventId
+                                ? { $addToSet: { paymentWebhookEventIds: eventId } }
+                                : {}),
+                        },
+                        { new: false },
+                    );
+
+                    if (!updatedOrder) {
+                        const latest = await Order.findById(order._id);
+                        if (eventId && latest?.paymentWebhookEventIds?.includes(eventId)) {
+                            return res.status(200).json({
+                                success: true,
+                                message: "Duplicate payment event already processed.",
+                            });
+                        }
+                        console.error("Payment webhook update rejected: conflicting payment ID or order state.");
+                        return res.status(409).json({
+                            success: false,
+                            message: "Payment webhook update conflict.",
+                        });
+                    }
+
                     const transitionedToSuccess =
-
-                        order.paymentStatus !== PaymentStatus.SUCCESS;
-
-                    order.paymentStatus = PaymentStatus.SUCCESS;
-
-                    order.razorpayPaymentId = paymentId;
-
-                    rememberPaymentEvent();
-
-                    await order.save();
+                        updatedOrder.paymentStatus !== PaymentStatus.SUCCESS;
 
                     // Stock is intentionally NOT changed here.
 
@@ -749,23 +736,42 @@ export class PaymentWebhookController {
 
                 }
 
-                // SUCCESS is final. Never downgrade a captured
+                // A failed event cannot downgrade an already-captured payment.
+                // Both event recording and status transition are atomic.
+                const failedUpdate = await Order.findOneAndUpdate(
+                    { _id: order._id, razorpayOrderId, ...eventFilter },
+                    [
+                        {
+                            $set: {
+                                paymentStatus: {
+                                    $cond: [
+                                        { $eq: ["$paymentStatus", PaymentStatus.SUCCESS] },
+                                        PaymentStatus.SUCCESS,
+                                        PaymentStatus.FAILED,
+                                    ],
+                                },
+                                ...(eventId
+                                    ? {
+                                        paymentWebhookEventIds: {
+                                            $setUnion: [
+                                                { $ifNull: ["$paymentWebhookEventIds", []] },
+                                                [eventId],
+                                            ],
+                                        },
+                                    }
+                                    : {}),
+                            },
+                        },
+                    ],
+                    { new: false },
+                );
 
-                // payment because of a delayed failed event.
-
-                if (
-
-                    order.paymentStatus !== PaymentStatus.SUCCESS
-
-                ) {
-
-                    order.paymentStatus = PaymentStatus.FAILED;
-
+                if (!failedUpdate) {
+                    return res.status(200).json({
+                        success: true,
+                        message: "Duplicate payment event already processed.",
+                    });
                 }
-
-                rememberPaymentEvent();
-
-                await order.save();
 
                 console.log(
 
@@ -777,7 +783,7 @@ export class PaymentWebhookController {
 
                         paymentId,
 
-                        paymentStatus: order.paymentStatus,
+                        paymentStatus: (await Order.findById(order._id))?.paymentStatus,
 
                     },
 
