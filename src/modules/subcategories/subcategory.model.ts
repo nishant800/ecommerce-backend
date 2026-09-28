@@ -3,9 +3,7 @@ import mongoose, {
     Schema,
     Model,
 } from "mongoose";
-
 import Category from "../categories/category.model.js";
-
 export interface ISubcategory
     extends Document {
     name: string;
@@ -15,7 +13,6 @@ export interface ISubcategory
     category: mongoose.Types.ObjectId;
     isActive: boolean;
 }
-
 const SubcategorySchema =
     new Schema<ISubcategory>(
         {
@@ -24,30 +21,25 @@ const SubcategorySchema =
                 required: true,
                 trim: true,
             },
-
             slug: {
                 type: String,
                 required: true,
                 lowercase: true,
                 trim: true,
             },
-
             image: {
                 type: String,
                 default: "",
             },
-
             description: {
                 type: String,
                 default: "",
             },
-
             category: {
                 type: Schema.Types.ObjectId,
                 ref: "Category",
                 required: true,
             },
-
             isActive: {
                 type: Boolean,
                 default: true,
@@ -57,7 +49,6 @@ const SubcategorySchema =
             timestamps: true,
         }
     );
-
 // A subcategory name only needs to be unique
 // inside its parent category.
 SubcategorySchema.index(
@@ -69,19 +60,16 @@ SubcategorySchema.index(
         unique: true,
     }
 );
-
 SubcategorySchema.pre(
     "validate",
     async function (next) {
         if (!this.category) {
             return next();
         }
-
         const category =
             await Category.findById(
                 this.category
             );
-
         if (!category) {
             return next(
                 new Error(
@@ -89,15 +77,12 @@ SubcategorySchema.pre(
                 )
             );
         }
-
         next();
     }
 );
-
 const Subcategory: Model<ISubcategory> =
     mongoose.model(
         "Subcategory",
         SubcategorySchema
     );
-
 export default Subcategory;

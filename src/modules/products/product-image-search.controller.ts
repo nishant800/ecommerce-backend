@@ -1,9 +1,7 @@
 import type { Request, Response } from 'express';
-
 import {
     ProductImageSearchService,
 } from './product-image-search.service.js';
-
 export class ProductImageSearchController {
     static async search(
         req: Request,
@@ -17,13 +15,11 @@ export class ProductImageSearchController {
                         'Product image is required.',
                 });
             }
-
             const matches =
                 await ProductImageSearchService.search(
                     req.file.buffer,
                     req.file.mimetype,
                 );
-
             return res.json({
                 success: true,
                 products: matches.map(
@@ -45,7 +41,6 @@ export class ProductImageSearchController {
                 'PRODUCT IMAGE SEARCH ERROR:',
                 error,
             );
-
             return res.status(500).json({
                 success: false,
                 message:

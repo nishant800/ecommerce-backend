@@ -1,26 +1,20 @@
 import { Response } from "express";
-
 import Order from "./order.model.js";
 import { AuthRequest } from "../../middleware/auth.middleware.js";
 import { OrderService } from "./order.service.js";
 import Product from "../products/product.model.js";
 import mongoose from "mongoose";
-
 import {
     NotificationService,
 } from "../../notifications/notification.service.js";
-
 import {
     NotificationType,
     NotificationRecipientRole,
 } from "../../notifications/notification.model.js";
-
-
 const getVariantChildStock = (
     variant: any,
     item: any,
 ) => {
-
     const optionType =
         String(
             item.optionType ||
@@ -29,14 +23,12 @@ const getVariantChildStock = (
         )
             .trim()
             .toLowerCase();
-
     const optionValue =
         String(
             item.optionValue ||
             item.variant?.optionValue ||
             ''
         ).trim();
-
     if (optionType === "size" && optionValue) {
         const option =
             variant?.sizes?.find(
@@ -44,13 +36,11 @@ const getVariantChildStock = (
                     String(entry.size).trim().toLowerCase() ===
                     String(optionValue).trim().toLowerCase(),
             );
-
         return {
             option,
             stock: Number(option?.stock || 0),
         };
     }
-
     if (optionType === "shade" && optionValue) {
         const option =
             variant?.shades?.find(
@@ -58,13 +48,11 @@ const getVariantChildStock = (
                     String(entry.shade).trim().toLowerCase() ===
                     String(optionValue).trim().toLowerCase(),
             );
-
         return {
             option,
             stock: Number(option?.stock || 0),
         };
     }
-
     if (optionType === "color" && optionValue) {
         const option =
             variant?.colors?.find(
@@ -72,23 +60,19 @@ const getVariantChildStock = (
                     String(entry.color).trim().toLowerCase() ===
                     String(optionValue).trim().toLowerCase(),
             );
-
         return {
             option,
             stock: Number(option?.stock || 0),
         };
     }
-
     return {
         option: null,
         stock: Number(variant?.stock || 0),
     };
 };
-
 const recalculateVariantStock = (
     variant: any,
 ) => {
-
     if (
         Array.isArray(variant?.sizes) &&
         variant.sizes.length > 0
@@ -100,7 +84,6 @@ const recalculateVariantStock = (
             0,
         );
     }
-
     if (
         Array.isArray(variant?.shades) &&
         variant.shades.length > 0
@@ -112,7 +95,6 @@ const recalculateVariantStock = (
             0,
         );
     }
-
     if (
         Array.isArray(variant?.colors) &&
         variant.colors.length > 0
@@ -124,22 +106,18 @@ const recalculateVariantStock = (
             0,
         );
     }
-
     return Number(variant?.stock || 0);
 };
-
 const deductVariantChildStock = (
     variant: any,
     item: any,
     quantity: number,
 ) => {
-
     const selected =
         getVariantChildStock(
             variant,
             item,
         );
-
     if (selected.option) {
         selected.option.stock =
             Math.max(
@@ -147,15 +125,12 @@ const deductVariantChildStock = (
                 Number(selected.option.stock || 0) -
                 quantity,
             );
-
         variant.stock =
             recalculateVariantStock(
                 variant,
             );
-
         return;
     }
-
     variant.stock =
         Math.max(
             0,
@@ -163,46 +138,34 @@ const deductVariantChildStock = (
             quantity,
         );
 };
-
-
-
 // =========================================
 // CREATE ORDER
 // =========================================
-
 export const createOrder = async (
     req: AuthRequest,
     res: Response
 ) => {
-
     let session: mongoose.ClientSession | null = null;
-
     try {
-
         const userId =
             req.user?.userId;
-
         if (!userId) {
             return res.status(401).json({
                 success: false,
                 message: "Unauthorized",
             });
         }
-
         // =========================================
         // REQUEST DATA
         // =========================================
-
         const {
             items,
             shippingAddress,
             paymentMethod,
         } = req.body;
-
         // =========================================
         // BASIC VALIDATION
         // =========================================
-
         if (
             !Array.isArray(items) ||
             items.length === 0
@@ -212,7 +175,6 @@ export const createOrder = async (
                 message: "Cart is empty",
             });
         }
-
         if (!shippingAddress) {
             return res.status(400).json({
                 success: false,
@@ -220,27 +182,22 @@ export const createOrder = async (
                     "Shipping address is required",
             });
         }
-
         // =========================================
         // MARKETPLACE DELIVERY AREA
         // =========================================
-
         const normalizedDeliveryCity =
             String(shippingAddress.city || "")
                 .toLowerCase()
                 .replace(/\s+/g, " ")
                 .trim();
-
         const deliveryPincode =
             String(
                 shippingAddress.pincode || ""
             ).trim();
-
         const allowedDeliveryPincodes = [
             "444001",
             "444002",
         ];
-
         if (
             normalizedDeliveryCity !== "akola" ||
             !allowedDeliveryPincodes.includes(
@@ -253,7 +210,6 @@ export const createOrder = async (
                     "Delivery is currently available only in Akola (444001 and 444002). Please select an eligible delivery address to continue.",
             });
         }
-
         // =========================================
         // START DATABASE TRANSACTION
         // =========================================
@@ -266,44 +222,32 @@ export const createOrder = async (
         // and protects against two customers buying
         // the same last item simultaneously.
         // =========================================
-
         session =
             await mongoose.startSession();
-
         session.startTransaction();
-
         // =========================================
         // BUILD ORDER ITEMS
         // =========================================
-
         const orderItems: any[] = [];
-
         let basePriceTotal = 0;
         let subtotalCalculated = 0;
-
         // =========================================
         // CHECK EVERY PRODUCT
         // =========================================
-
         for (const item of items) {
-
             // -------------------------------------
             // PRODUCT ID
             // -------------------------------------
-
             if (!item?.product) {
                 throw new Error(
                     "Product ID is missing from order item"
                 );
             }
-
             // -------------------------------------
             // QUANTITY
             // -------------------------------------
-
             const quantity =
                 Number(item.quantity) || 0;
-
             if (
                 !Number.isInteger(quantity) ||
                 quantity < 1
@@ -312,46 +256,36 @@ export const createOrder = async (
                     "Invalid quantity for order item"
                 );
             }
-
             // -------------------------------------
             // GET PRODUCT INSIDE TRANSACTION
             // -------------------------------------
-
             const product =
                 await Product.findById(
                     item.product
                 ).session(session);
-
             if (!product) {
                 throw new Error(
                     `Product not found: ${item.product}`
                 );
             }
-
             if (!product.active) {
                 throw new Error(
                     `Product ${product.name} is no longer available`,
                 );
             }
-
             // -------------------------------------
             // SELLER
             // -------------------------------------
-
             if (!product.seller) {
                 throw new Error(
                     `Product "${product.name}" does not have a seller assigned.`
                 );
             }
-
             // =====================================
             // FIND SELECTED VARIANT FROM DATABASE
             // =====================================
-
             let selectedVariant: any = null;
-
             if (item?.variant?.sku) {
-
                 selectedVariant =
                     product.variants?.find(
                         (variant: any) =>
@@ -362,46 +296,38 @@ export const createOrder = async (
                                 item.variant.sku
                             )
                     );
-
                 if (!selectedVariant) {
                     throw new Error(
                         `Variant ${item.variant.sku} not found for ${product.name}`
                     );
                 }
-
                 if (selectedVariant.active === false) {
                     throw new Error(
                         `Selected variant is no longer available for ${product.name}`,
                     );
                 }
-
                 // =================================
                 // CHECK EXACT VARIANT/CHILD STOCK
                 // =================================
-
                 const selectedStock =
                     getVariantChildStock(
                         selectedVariant,
                         item
                     );
-
                 if (
                     selectedStock.stock <
                     quantity
                 ) {
-
                     const optionLabel =
                         item.optionType &&
                             item.optionValue
                             ? `${item.optionType} ${item.optionValue}`
                             : `variant ${selectedVariant.sku}`;
-
                     throw new Error(
                         `${product.name} (${optionLabel}) has only ${selectedStock.stock} items in stock.`
                     );
                 }
             }
-
             // =====================================
             // SERVER-AUTHORITATIVE PRICE
             // =====================================
@@ -415,11 +341,9 @@ export const createOrder = async (
             // For a normal product, use the product
             // price/discount price stored in MongoDB.
             // =====================================
-
             // =====================================
             // PRICE FROM DATABASE
             // =====================================
-
             // MRP:
             // Use the selected variant price when it is
             // actually configured. If the variant price
@@ -430,17 +354,14 @@ export const createOrder = async (
                         selectedVariant.price
                     ) || 0
                     : 0;
-
             const productMRP =
                 Number(
                     product.price
                 ) || 0;
-
             const basePrice =
                 selectedVariantPrice > 0
                     ? selectedVariantPrice
                     : productMRP;
-
             if (
                 !Number.isFinite(basePrice) ||
                 basePrice < 0
@@ -449,24 +370,20 @@ export const createOrder = async (
                     `Invalid price for ${product.name}`
                 );
             }
-
             const productDiscountPrice =
                 Number(
                     product.discountPrice
                 ) || 0;
-
             const variantDiscountPrice =
                 selectedVariant
                     ? Number(selectedVariant.discountPrice) || 0
                     : 0;
-
             const finalPrice =
                 variantDiscountPrice > 0
                     ? variantDiscountPrice
                     : productDiscountPrice > 0
-                    ? productDiscountPrice
-                    : basePrice;
-
+                        ? productDiscountPrice
+                        : basePrice;
             if (
                 !Number.isFinite(finalPrice) ||
                 finalPrice < 0 ||
@@ -476,7 +393,6 @@ export const createOrder = async (
                     `Invalid discount price for ${product.name}`
                 );
             }
-
             // =====================================
             // UPDATE EXACT STOCK IN MEMORY
             // =====================================
@@ -486,27 +402,22 @@ export const createOrder = async (
             // modifications cannot silently create a
             // second successful order.
             // =====================================
-
             if (selectedVariant) {
-
                 const optionType =
                     String(
                         item.optionType ||
                         item.variant?.optionType ||
                         ""
                     ).trim().toLowerCase();
-
                 const optionValue =
                     String(
                         item.optionValue ||
                         item.variant?.optionValue ||
                         ""
                     ).trim();
-
                 // ---------------------------------
                 // SIZE
                 // ---------------------------------
-
                 if (
                     optionType === "size" &&
                     Array.isArray(
@@ -514,7 +425,6 @@ export const createOrder = async (
                     ) &&
                     selectedVariant.sizes.length > 0
                 ) {
-
                     const option =
                         selectedVariant.sizes.find(
                             (entry: any) =>
@@ -524,13 +434,11 @@ export const createOrder = async (
                                     .toLowerCase() ===
                                 optionValue.toLowerCase()
                         );
-
                     if (!option) {
                         throw new Error(
                             `Selected size is not available for ${product.name}`
                         );
                     }
-
                     if (
                         Number(option.stock || 0) <
                         quantity
@@ -539,21 +447,17 @@ export const createOrder = async (
                             `${product.name} (${optionValue}) is out of stock`
                         );
                     }
-
                     option.stock =
                         Number(option.stock || 0) -
                         quantity;
-
                     selectedVariant.stock =
                         recalculateVariantStock(
                             selectedVariant
                         );
                 }
-
                 // ---------------------------------
                 // SHADE
                 // ---------------------------------
-
                 else if (
                     optionType === "shade" &&
                     Array.isArray(
@@ -561,7 +465,6 @@ export const createOrder = async (
                     ) &&
                     selectedVariant.shades.length > 0
                 ) {
-
                     const option =
                         selectedVariant.shades.find(
                             (entry: any) =>
@@ -571,13 +474,11 @@ export const createOrder = async (
                                     .toLowerCase() ===
                                 optionValue.toLowerCase()
                         );
-
                     if (!option) {
                         throw new Error(
                             `Selected shade is not available for ${product.name}`
                         );
                     }
-
                     if (
                         Number(option.stock || 0) <
                         quantity
@@ -586,21 +487,17 @@ export const createOrder = async (
                             `${product.name} (${optionValue}) is out of stock`
                         );
                     }
-
                     option.stock =
                         Number(option.stock || 0) -
                         quantity;
-
                     selectedVariant.stock =
                         recalculateVariantStock(
                             selectedVariant
                         );
                 }
-
                 // ---------------------------------
                 // COLOR
                 // ---------------------------------
-
                 else if (
                     optionType === "color" &&
                     Array.isArray(
@@ -608,7 +505,6 @@ export const createOrder = async (
                     ) &&
                     selectedVariant.colors.length > 0
                 ) {
-
                     const option =
                         selectedVariant.colors.find(
                             (entry: any) =>
@@ -618,13 +514,11 @@ export const createOrder = async (
                                     .toLowerCase() ===
                                 optionValue.toLowerCase()
                         );
-
                     if (!option) {
                         throw new Error(
                             `Selected color is not available for ${product.name}`
                         );
                     }
-
                     if (
                         Number(option.stock || 0) <
                         quantity
@@ -633,23 +527,18 @@ export const createOrder = async (
                             `${product.name} (${optionValue}) is out of stock`
                         );
                     }
-
                     option.stock =
                         Number(option.stock || 0) -
                         quantity;
-
                     selectedVariant.stock =
                         recalculateVariantStock(
                             selectedVariant
                         );
                 }
-
                 // ---------------------------------
                 // NORMAL VARIANT STOCK
                 // ---------------------------------
-
                 else {
-
                     if (
                         Number(
                             selectedVariant.stock || 0
@@ -660,25 +549,20 @@ export const createOrder = async (
                             `${product.name} is out of stock`
                         );
                     }
-
                     selectedVariant.stock =
                         Number(
                             selectedVariant.stock || 0
                         ) -
                         quantity;
                 }
-
             } else {
-
                 // ---------------------------------
                 // NORMAL PRODUCT STOCK
                 // ---------------------------------
-
                 const productStock =
                     Number(
                         product.stock
                     ) || 0;
-
                 if (
                     productStock <
                     quantity
@@ -687,32 +571,25 @@ export const createOrder = async (
                         `${product.name} has only ${productStock} items in stock.`
                     );
                 }
-
                 product.stock =
                     productStock -
                     quantity;
             }
-
             // =====================================
             // SAVE PRODUCT STOCK
             // =====================================
-
             await product.save({
                 session,
             });
-
             // =====================================
             // TOTALS
             // =====================================
-
             basePriceTotal +=
                 basePrice *
                 quantity;
-
             subtotalCalculated +=
                 finalPrice *
                 quantity;
-
             // =====================================
             // BUILD DATABASE VARIANT SNAPSHOT
             // =====================================
@@ -721,7 +598,6 @@ export const createOrder = async (
             // by the customer. Save values from the
             // verified database variant instead.
             // =====================================
-
             const variantSnapshot =
                 selectedVariant
                     ? {
@@ -778,22 +654,17 @@ export const createOrder = async (
                             "",
                     }
                     : null;
-
             // =====================================
             // SELECTED VARIANT IMAGE
             // =====================================
-
             let selectedVariantImage = "";
-
             if (selectedVariant) {
-
                 // Generic / bangle variant image.
                 selectedVariantImage =
                     selectedVariant.colorImage ||
                     selectedVariant.image ||
                     selectedVariant.thumbnail ||
                     "";
-
                 // Cosmetic shade image.
                 if (
                     !selectedVariantImage &&
@@ -820,7 +691,6 @@ export const createOrder = async (
                         )?.image ||
                         "";
                 }
-
                 // Watch color image.
                 if (
                     !selectedVariantImage &&
@@ -848,18 +718,13 @@ export const createOrder = async (
                         "";
                 }
             }
-
             orderItems.push({
-
                 product:
                     product._id,
-
                 seller:
                     product.seller,
-
                 name:
                     product.name,
-
                 // Selected variant image first,
                 // normal product image as fallback.
                 image:
@@ -867,19 +732,14 @@ export const createOrder = async (
                     product.thumbnail ||
                     product.images?.[0]?.url ||
                     "",
-
                 // Database price snapshot
                 basePrice,
-
                 // Database final price snapshot
                 discountPrice:
                     finalPrice,
-
                 price:
                     finalPrice,
-
                 quantity,
-
                 ...(variantSnapshot
                     ? {
                         variant:
@@ -888,72 +748,54 @@ export const createOrder = async (
                     : {}),
             });
         }
-
         // =========================================
         // FINAL SERVER-SIDE PRICE CALCULATION
         // =========================================
-
         const calculatedsubtotal =
             subtotalCalculated;
-
         const calculatedDiscount =
             Math.max(
                 0,
                 basePriceTotal -
                 calculatedsubtotal
             );
-
         const calculatedShippingCharge =
             calculatedsubtotal < 500
                 ? 30
                 : 0;
-
         // Tax is currently disabled in the
         // existing checkout flow.
         const calculatedTax = 0;
-
         const calculatedTotal =
             calculatedsubtotal +
             calculatedShippingCharge;
-
         // =========================================
         // CREATE ORDER INSIDE SAME TRANSACTION
         // =========================================
-
         const [order] =
             await Order.create(
                 [
                     {
                         user:
                             userId,
-
                         items:
                             orderItems,
-
                         shippingAddress,
-
                         subtotal:
                             calculatedsubtotal,
-
                         shippingCharge:
                             calculatedShippingCharge,
-
                         discount:
                             calculatedDiscount,
-
                         tax:
                             calculatedTax,
-
                         total:
                             calculatedTotal,
-
                         paymentMethod:
                             paymentMethod ||
                             "COD",
-
                         paymentStatus:
                             "pending",
-
                         orderStatus:
                             "pending",
                     },
@@ -962,13 +804,10 @@ export const createOrder = async (
                     session,
                 }
             );
-
         // =========================================
         // COMMIT
         // =========================================
-
         await session.commitTransaction();
-
         // =========================================
         // CREATE ORDER NOTIFICATIONS
         // =========================================
@@ -978,33 +817,23 @@ export const createOrder = async (
         // A notification failure must never undo a
         // successful order.
         // =========================================
-
         try {
-
             await NotificationService.create({
-
                 userId:
                     userId,
-
                 recipientRole:
                     NotificationRecipientRole.CUSTOMER,
-
                 type:
                     NotificationType.ORDER_PLACED,
-
                 title:
                     "Order Placed",
-
                 message:
                     `Your order #${order._id
                         .toString()
                         .slice(-8)} has been placed successfully.`,
-
                 orderId:
                     order._id,
             });
-
-
             const sellerIds =
                 [
                     ...new Set(
@@ -1019,52 +848,39 @@ export const createOrder = async (
                             ),
                     ),
                 ];
-
-
             await Promise.all(
                 sellerIds.map(
                     sellerId =>
                         NotificationService.create({
-
                             userId:
                                 sellerId,
-
                             recipientRole:
                                 NotificationRecipientRole.SELLER,
-
                             type:
                                 NotificationType.NEW_ORDER,
-
                             title:
                                 "New Order Received",
-
                             message:
                                 `You have received a new order #${order._id
                                     .toString()
                                     .slice(-8)}.`,
-
                             orderId:
                                 order._id,
                         })
                 ),
             );
-
         } catch (
         notificationError
         ) {
-
             console.error(
                 "ORDER NOTIFICATION ERROR:",
                 notificationError,
             );
         }
-
-
         console.log(
             "ORDER CREATED:",
             order._id.toString()
         );
-
         console.log(
             "ORDER PRICING:",
             {
@@ -1081,25 +897,18 @@ export const createOrder = async (
                     calculatedTotal,
             }
         );
-
         // =========================================
         // RESPONSE
         // =========================================
-
         return res.status(201).json({
-
             success:
                 true,
-
             message:
                 "Order created successfully",
-
             data:
                 order,
         });
-
     } catch (error: any) {
-
         if (session) {
             try {
                 await session.abortTransaction();
@@ -1107,12 +916,10 @@ export const createOrder = async (
                 // Ignore abort errors.
             }
         }
-
         console.error(
             "CREATE ORDER ERROR:",
             error
         );
-
         return res.status(
             error?.message?.includes(
                 "out of stock"
@@ -1123,119 +930,80 @@ export const createOrder = async (
                 ? 400
                 : 500
         ).json({
-
             success:
                 false,
-
             message:
                 error?.message ||
                 "Failed to create order",
         });
-
     } finally {
-
         if (session) {
             await session.endSession();
         }
     }
 };
-
-
 // =========================================
 // ORDER CONTROLLER
 // =========================================
-
 export class OrderController {
-
-
     // =========================================
     // GET MY ORDERS
     // =========================================
-
     static async getMyOrders(
         req: AuthRequest,
         res: Response
     ) {
-
         try {
-
             const userId =
                 req.user?.userId;
-
-
             if (!userId) {
-
                 return res.status(401).json({
                     success: false,
                     message:
                         "Unauthorized",
                 });
             }
-
-
             const orders =
                 await OrderService.getMyOrders(
                     userId
                 );
-
-
             return res.json({
-
                 success:
                     true,
-
                 data:
                     orders,
             });
-
-
         } catch (error: any) {
-
             console.error(
                 "GET MY ORDERS ERROR:",
                 error
             );
-
-
             return res.status(500).json({
-
                 success:
                     false,
-
                 message:
                     error?.message ||
                     "Failed to load orders",
             });
         }
     }
-
-
-
     // =========================================
     // GET ORDER DETAILS
     // =========================================
-
     static async getOrder(
         req: AuthRequest,
         res: Response
     ) {
-
         try {
-
             const userId =
                 req.user?.userId;
-
-
             if (!userId) {
-
                 return res.status(401).json({
                     success: false,
                     message:
                         "Unauthorized",
                 });
             }
-
-
             const order =
                 await OrderService.getOrder(
                     userId,
@@ -1243,81 +1011,119 @@ export class OrderController {
                         req.params.id
                     )
                 );
-
-
             if (!order) {
-
                 return res.status(404).json({
-
                     success:
                         false,
-
                     message:
                         "Order not found",
                 });
             }
-
-
             return res.json({
-
                 success:
                     true,
-
                 data:
                     order,
             });
-
-
         } catch (error: any) {
-
             console.error(
                 "GET ORDER ERROR:",
                 error
             );
-
-
             return res.status(500).json({
-
                 success:
                     false,
-
                 message:
                     error?.message ||
                     "Failed to load order",
             });
         }
     }
-
-
-
+    // =========================================
+    // CANCEL ONE PRODUCT / ORDER ITEM
+    // PATCH /orders/:id/items/:itemIndex/cancel
+    // =========================================
+    static async cancelItem(
+        req: AuthRequest,
+        res: Response
+    ) {
+        try {
+            const userId =
+                req.user?.userId;
+            if (!userId) {
+                return res.status(401).json({
+                    success: false,
+                    message: "Unauthorized",
+                });
+            }
+            const orderId =
+                String(req.params.id || "").trim();
+            const itemIndex =
+                Number(req.params.itemIndex);
+            if (!orderId) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Order ID is required",
+                });
+            }
+            if (
+                !Number.isInteger(itemIndex) ||
+                itemIndex < 0
+            ) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid order item index",
+                });
+            }
+            const order =
+                await OrderService.cancelOrderItem(
+                    userId,
+                    orderId,
+                    itemIndex,
+                );
+            if (!order) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Order not found",
+                });
+            }
+            return res.json({
+                success: true,
+                message:
+                    "Order item cancelled successfully",
+                data: order,
+            });
+        } catch (error: any) {
+            console.error(
+                "CANCEL ORDER ITEM ERROR:",
+                error
+            );
+            return res.status(400).json({
+                success: false,
+                message:
+                    error?.message ||
+                    "Failed to cancel order item",
+            });
+        }
+    }
     // =========================================
     // CANCEL ORDER
     // =========================================
-
     static async cancel(
         req: AuthRequest,
         res: Response
     ) {
-
         try {
-
             const userId =
                 req.user?.userId;
-
-
             if (!userId) {
-
                 return res.status(401).json({
-
                     success:
                         false,
-
                     message:
                         "Unauthorized",
                 });
             }
-
-
             const order =
                 await OrderService.cancelOrder(
                     userId,
@@ -1325,44 +1131,28 @@ export class OrderController {
                         req.params.id
                     )
                 );
-
-
             if (!order) {
-
                 return res.status(404).json({
-
                     success:
                         false,
-
                     message:
                         "Order not found",
                 });
             }
-
-
             return res.json({
-
                 success:
                     true,
-
                 data:
                     order,
             });
-
-
         } catch (error: any) {
-
             console.error(
                 "CANCEL ORDER ERROR:",
                 error
             );
-
-
             return res.status(400).json({
-
                 success:
                     false,
-
                 message:
                     error?.message ||
                     "Failed to cancel order",

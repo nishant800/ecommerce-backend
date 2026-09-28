@@ -1,414 +1,1880 @@
-import {
-    Request,
-    Response,
-} from "express";
-
 import crypto from "crypto";
 
-import Order, {
-    PaymentStatus,
-    RefundStatus,
-} from "../orders/order.model.js";
+import type { Request, Response } from "express";
+
+import Order, { PaymentStatus, RefundStatus } from "../orders/order.model.js";
+import Cart from "../cart/cart.model.js";
+
+import {
+
+    NotificationService,
+
+} from "../../notifications/notification.service.js"
+
+import {
+
+    NotificationRecipientRole,
+
+    NotificationType,
+
+} from "../../notifications/notification.model.js";
 
 // =========================================
+
+// HELPERS
+
+// =========================================
+
+const roundMoney = (value: number): number =>
+
+    Math.round((value + Number.EPSILON) * 100) / 100;
+
+const clampNonNegative = (value: number): number =>
+
+    Math.max(0, roundMoney(value));
+
+function getRefundStatus(
+
+    event: string,
+
+    razorpayStatus?: string,
+
+): RefundStatus {
+
+    const status = String(
+
+        razorpayStatus || "",
+
+    )
+
+        .trim()
+
+        .toLowerCase();
+
+    if (
+
+        event === "refund.processed" ||
+
+        status === "processed"
+
+    ) {
+
+        return RefundStatus.PROCESSED;
+
+    }
+
+    if (
+
+        event === "refund.failed" ||
+
+        status === "failed"
+
+    ) {
+
+        return RefundStatus.FAILED;
+
+    }
+
+    return RefundStatus.PENDING;
+
+}
+
+function recalculateAggregateRefundStatus(
+
+    order: any,
+
+): void {
+
+    const refunds = Array.isArray(order.refunds)
+
+        ? order.refunds
+
+        : [];
+
+    if (refunds.length === 0) {
+
+        order.refundStatus = RefundStatus.NONE;
+
+        return;
+
+    }
+
+    if (
+
+        refunds.some(
+
+            (refund: any) =>
+
+                refund.status ===
+
+                RefundStatus.PENDING,
+
+        )
+
+    ) {
+
+        order.refundStatus =
+
+            RefundStatus.PENDING;
+
+        return;
+
+    }
+
+    if (
+
+        refunds.some(
+
+            (refund: any) =>
+
+                refund.status ===
+
+                RefundStatus.FAILED,
+
+        )
+
+    ) {
+
+        order.refundStatus =
+
+            RefundStatus.FAILED;
+
+        return;
+
+    }
+
+    if (
+
+        refunds.some(
+
+            (refund: any) =>
+
+                refund.status ===
+
+                RefundStatus.PROCESSED,
+
+        )
+
+    ) {
+
+        order.refundStatus =
+
+            RefundStatus.PROCESSED;
+
+        return;
+
+    }
+
+    order.refundStatus = RefundStatus.NONE;
+
+}
+
+function timingSafeSignatureMatch(
+
+    rawBody: Buffer,
+
+    receivedSignature: string,
+
+    secret: string,
+
+): boolean {
+
+    const expectedSignature = crypto
+
+        .createHmac("sha256", secret)
+
+        .update(rawBody)
+
+        .digest("hex");
+
+    const expectedBuffer = Buffer.from(
+
+        expectedSignature,
+
+        "utf8",
+
+    );
+
+    const receivedBuffer = Buffer.from(
+
+        String(receivedSignature || ""),
+
+        "utf8",
+
+    );
+
+    if (
+
+        expectedBuffer.length !==
+
+        receivedBuffer.length
+
+    ) {
+
+        return false;
+
+    }
+
+    return crypto.timingSafeEqual(
+
+        expectedBuffer,
+
+        receivedBuffer,
+
+    );
+
+}
+
+// =========================================
+
 // RAZORPAY WEBHOOK CONTROLLER
+
 // =========================================
 
 export class PaymentWebhookController {
 
     static async handle(
+
         req: Request,
-        res: Response
+
+        res: Response,
+
     ) {
+
         try {
 
             // =====================================
+
             // WEBHOOK SECRET
+
             // =====================================
 
             const webhookSecret =
+
                 process.env.RAZORPAY_WEBHOOK_SECRET;
 
             if (!webhookSecret) {
 
                 console.error(
-                    "RAZORPAY_WEBHOOK_SECRET is not configured."
+
+                    "RAZORPAY_WEBHOOK_SECRET is not configured.",
+
                 );
 
                 return res.status(500).json({
+
                     success: false,
+
                     message:
+
                         "Webhook secret is not configured.",
+
                 });
+
             }
 
             // =====================================
+
             // RAW BODY
+
             // =====================================
 
+            // Razorpay signature MUST be verified
+
+            // against the exact raw request body.
+
             const rawBody =
+
                 Buffer.isBuffer(req.body)
+
                     ? req.body
+
                     : null;
 
             if (!rawBody) {
 
                 console.error(
-                    "Razorpay webhook raw body is missing."
+
+                    "Razorpay webhook raw body is missing.",
+
                 );
 
                 return res.status(400).json({
+
                     success: false,
+
                     message:
+
                         "Raw webhook body is required.",
+
                 });
+
             }
 
             // =====================================
+
             // RAZORPAY SIGNATURE
+
             // =====================================
 
             const receivedSignature =
+
                 String(
+
                     req.headers[
+
                     "x-razorpay-signature"
+
                     ] || "",
+
                 );
 
-            if (!receivedSignature) {
+            if (
 
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Razorpay webhook signature is missing.",
-                });
-            }
+                !receivedSignature ||
 
-            const expectedSignature =
-                crypto
-                    .createHmac(
-                        "sha256",
-                        webhookSecret,
-                    )
-                    .update(rawBody)
-                    .digest("hex");
+                !timingSafeSignatureMatch(
 
-            const signaturesMatch =
-                receivedSignature.length ===
-                expectedSignature.length &&
-                crypto.timingSafeEqual(
-                    Buffer.from(
-                        receivedSignature,
-                    ),
-                    Buffer.from(
-                        expectedSignature,
-                    ),
-                );
+                    rawBody,
 
-            if (!signaturesMatch) {
+                    receivedSignature,
+
+                    webhookSecret,
+
+                )
+
+            ) {
 
                 console.error(
-                    "❌ INVALID RAZORPAY WEBHOOK SIGNATURE"
+
+                    "❌ INVALID RAZORPAY WEBHOOK SIGNATURE",
+
                 );
 
                 return res.status(400).json({
+
                     success: false,
+
                     message:
+
                         "Invalid webhook signature.",
+
                 });
+
             }
 
             // =====================================
+
             // PARSE AFTER SIGNATURE VERIFICATION
+
             // =====================================
 
-            const payload =
-                JSON.parse(
+            let payload: any;
+
+            try {
+
+                payload = JSON.parse(
+
                     rawBody.toString("utf8"),
+
                 );
 
+            } catch {
+
+                console.error(
+
+                    "Invalid Razorpay webhook JSON.",
+
+                );
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+
+                        "Invalid webhook JSON payload.",
+
+                });
+
+            }
+
             const event =
+
                 String(
+
                     payload?.event || "",
+
                 ).trim();
 
             const eventId =
+
                 String(
+
                     req.headers[
+
                     "x-razorpay-event-id"
+
                     ] || "",
+
                 ).trim();
 
             console.log(
-                "================================"
+
+                "================================",
+
             );
 
             console.log(
+
                 "RAZORPAY WEBHOOK:",
+
                 event,
+
             );
 
             console.log(
+
                 "EVENT ID:",
+
                 eventId || "NOT PROVIDED",
+
             );
 
             // =====================================
+
             // SUPPORTED REFUND EVENTS
+
             // =====================================
 
-            const supportedEvents =
-                new Set([
-                    "refund.created",
-                    "refund.processed",
-                    "refund.failed",
-                    "refund.speed_changed",
-                ]);
+            const supportedEvents = new Set([
 
-            if (
-                !supportedEvents.has(event)
-            ) {
+                "payment.captured",
+
+                "payment.failed",
+
+                "refund.created",
+
+                "refund.processed",
+
+                "refund.failed",
+
+                "refund.speed_changed",
+
+            ]);
+
+            if (!supportedEvents.has(event)) {
 
                 console.log(
+
                     "ℹ️ Ignoring Razorpay event:",
+
                     event,
+
                 );
 
                 return res.status(200).json({
+
                     success: true,
-                    message:
-                        "Event ignored.",
+
+                    message: "Event ignored.",
+
                 });
+
             }
 
             // =====================================
+
+            // PAYMENT EVENTS
+
+            // =====================================
+
+            if (
+
+                event === "payment.captured" ||
+
+                event === "payment.failed"
+
+            ) {
+
+                const payment =
+
+                    payload?.payload?.payment?.entity;
+
+                const paymentId = String(
+
+                    payment?.id || "",
+
+                ).trim();
+
+                const razorpayOrderId = String(
+
+                    payment?.order_id || "",
+
+                ).trim();
+
+                if (!paymentId || !razorpayOrderId) {
+
+                    console.error(
+
+                        "Razorpay payment entity/order information missing.",
+
+                    );
+
+                    return res.status(200).json({
+
+                        success: true,
+
+                        message: "Payment payload ignored.",
+
+                    });
+
+                }
+
+                const order = await Order.findOne({
+
+                    razorpayOrderId,
+
+                });
+
+                if (!order) {
+
+                    console.error(
+
+                        "Order not found for Razorpay payment:",
+
+                        { paymentId, razorpayOrderId },
+
+                    );
+
+                    return res.status(200).json({
+
+                        success: true,
+
+                        message: "Order not found; webhook acknowledged.",
+
+                    });
+
+                }
+
+                const existingEventIds = Array.isArray(
+
+                    order.paymentWebhookEventIds,
+
+                )
+
+                    ? order.paymentWebhookEventIds
+
+                    : [];
+
+                if (
+
+                    eventId &&
+
+                    existingEventIds.includes(eventId)
+
+                ) {
+
+                    return res.status(200).json({
+
+                        success: true,
+
+                        message: "Duplicate payment event already processed.",
+
+                    });
+
+                }
+
+                const rememberPaymentEvent = () => {
+
+                    if (
+
+                        eventId &&
+
+                        !existingEventIds.includes(eventId)
+
+                    ) {
+
+                        order.paymentWebhookEventIds = [
+
+                            ...existingEventIds,
+
+                            eventId,
+
+                        ];
+
+                    }
+
+                };
+
+                if (event === "payment.captured") {
+
+                    const paymentStatus = String(
+
+                        payment?.status || "",
+
+                    )
+
+                        .trim()
+
+                        .toLowerCase();
+
+                    if (paymentStatus !== "captured") {
+
+                        return res.status(400).json({
+
+                            success: false,
+
+                            message: "Invalid captured payment payload.",
+
+                        });
+
+                    }
+
+                    const expectedAmountPaise = Math.round(
+
+                        Number(order.total) * 100,
+
+                    );
+
+                    const actualAmountPaise = Number(
+
+                        payment?.amount,
+
+                    );
+
+                    if (
+
+                        !Number.isFinite(actualAmountPaise) ||
+
+                        actualAmountPaise !== expectedAmountPaise
+
+                    ) {
+
+                        return res.status(400).json({
+
+                            success: false,
+
+                            message: "Payment amount does not match order amount.",
+
+                        });
+
+                    }
+
+                    if (
+
+                        String(payment?.currency || "")
+
+                            .trim()
+
+                            .toUpperCase() !== "INR"
+
+                    ) {
+
+                        return res.status(400).json({
+
+                            success: false,
+
+                            message: "Unexpected payment currency.",
+
+                        });
+
+                    }
+
+                    const transitionedToSuccess =
+
+                        order.paymentStatus !== PaymentStatus.SUCCESS;
+
+                    order.paymentStatus = PaymentStatus.SUCCESS;
+
+                    order.razorpayPaymentId = paymentId;
+
+                    rememberPaymentEvent();
+
+                    await order.save();
+
+                    // Stock is intentionally NOT changed here.
+
+                    // Checkout already reserves/deducts it.
+
+                    if (transitionedToSuccess) {
+
+                        try {
+
+                            await Cart.findOneAndUpdate(
+
+                                { user: order.user },
+
+                                { items: [] },
+
+                            );
+
+                        } catch (cartError) {
+
+                            console.error(
+
+                                "PAYMENT WEBHOOK CART CLEAR ERROR:",
+
+                                cartError,
+
+                            );
+
+                        }
+
+                    }
+
+                    console.log(
+
+                        "✅ PAYMENT CAPTURED WEBHOOK PROCESSED:",
+
+                        {
+
+                            orderId: order._id.toString(),
+
+                            paymentId,
+
+                            transitionedToSuccess,
+
+                        },
+
+                    );
+
+                    return res.status(200).json({
+
+                        success: true,
+
+                        message: "Payment captured webhook processed successfully.",
+
+                    });
+
+                }
+
+                // SUCCESS is final. Never downgrade a captured
+
+                // payment because of a delayed failed event.
+
+                if (
+
+                    order.paymentStatus !== PaymentStatus.SUCCESS
+
+                ) {
+
+                    order.paymentStatus = PaymentStatus.FAILED;
+
+                }
+
+                rememberPaymentEvent();
+
+                await order.save();
+
+                console.log(
+
+                    "ℹ️ PAYMENT FAILED WEBHOOK PROCESSED:",
+
+                    {
+
+                        orderId: order._id.toString(),
+
+                        paymentId,
+
+                        paymentStatus: order.paymentStatus,
+
+                    },
+
+                );
+
+                return res.status(200).json({
+
+                    success: true,
+
+                    message: "Payment failed webhook processed successfully.",
+
+                });
+
+            }
+
+            // =====================================
+
             // REFUND ENTITY
+
             // =====================================
 
             const refund =
+
                 payload?.payload?.refund?.entity;
 
-            if (!refund?.id) {
+            if (
+
+                !refund?.id ||
+
+                !refund?.payment_id
+
+            ) {
 
                 console.error(
-                    "Refund entity missing from webhook."
+
+                    "Refund entity/payment information missing.",
+
                 );
 
-                return res.status(400).json({
-                    success: false,
+                return res.status(200).json({
+
+                    success: true,
+
                     message:
-                        "Refund information missing.",
+
+                        "Refund payload ignored.",
+
                 });
+
             }
 
             const refundId =
-                String(refund.id);
+
+                String(refund.id).trim();
 
             const paymentId =
+
                 String(
+
                     refund.payment_id || "",
-                );
+
+                ).trim();
 
             const refundAmount =
-                Number(
-                    refund.amount || 0,
-                ) / 100;
 
-            const refundStatus =
+                roundMoney(
+
+                    Number(
+
+                        refund.amount || 0,
+
+                    ) / 100,
+
+                );
+
+            const razorpayRefundStatus =
+
                 String(
+
                     refund.status || "",
+
                 )
+
                     .trim()
+
                     .toLowerCase();
 
+            const finalStatus =
+
+                getRefundStatus(
+
+                    event,
+
+                    razorpayRefundStatus,
+
+                );
+
+            // Our PaymentService sends:
+
+            // notes.refund_request_id
+
+            // and also uses receipt=requestId.
+
+            const requestIdFromNotes =
+
+                String(
+
+                    refund?.notes
+
+                        ?.refund_request_id || "",
+
+                ).trim();
+
+            const receipt =
+
+                String(
+
+                    refund?.receipt || "",
+
+                ).trim();
+
+            const requestId =
+
+                requestIdFromNotes ||
+
+                receipt;
+
             // =====================================
+
             // FIND ORDER
+
             // =====================================
 
             const order =
-                paymentId
-                    ? await Order.findOne({
-                        razorpayPaymentId:
-                            paymentId,
-                    })
-                    : await Order.findOne({
-                        refundId,
-                    });
+
+                await Order.findOne({
+
+                    $or: [
+
+                        {
+
+                            razorpayPaymentId:
+
+                                paymentId,
+
+                        },
+
+                        {
+
+                            "refunds.razorpayRefundId":
+
+                                refundId,
+
+                        },
+
+                        ...(requestId
+
+                            ? [
+
+                                {
+
+                                    "refunds.requestId":
+
+                                        requestId,
+
+                                },
+
+                            ]
+
+                            : []),
+
+                    ],
+
+                });
 
             if (!order) {
 
                 console.error(
+
                     "Order not found for Razorpay refund:",
+
                     {
+
                         refundId,
+
                         paymentId,
+
+                        requestId,
+
                     },
+
                 );
 
-                // Return 200 so Razorpay does not
-                // endlessly retry a valid webhook
-                // for an unknown historical order.
+                // Acknowledge valid webhooks so
+
+                // Razorpay does not endlessly retry
+
+                // an old/unmatched refund.
+
                 return res.status(200).json({
+
                     success: true,
+
                     message:
+
                         "Order not found; webhook acknowledged.",
+
                 });
+
             }
 
             // =====================================
+
             // DUPLICATE EVENT PROTECTION
+
             // =====================================
 
-            const currentEventId =
-                eventId || "";
-
             const alreadyProcessed =
-                currentEventId &&
+
+                !!eventId &&
+
                 Array.isArray(
-                    (order as any)
-                        .refundWebhookEventIds,
+
+                    order.refundWebhookEventIds,
+
                 ) &&
-                (order as any)
-                    .refundWebhookEventIds
-                    .includes(
-                        currentEventId,
-                    );
+
+                order.refundWebhookEventIds.includes(
+
+                    eventId,
+
+                );
 
             if (alreadyProcessed) {
 
                 console.log(
+
                     "ℹ️ Duplicate Razorpay webhook ignored:",
-                    currentEventId,
+
+                    eventId,
+
                 );
 
                 return res.status(200).json({
+
                     success: true,
+
                     message:
+
                         "Duplicate event already processed.",
+
                 });
+
             }
 
             // =====================================
-            // REFUND STATUS
+
+            // FIND INDIVIDUAL REFUND RECORD
+
             // =====================================
 
-            let finalStatus:
-                RefundStatus;
+            let refundRecord: any = null;
+
+            if (requestId) {
+
+                refundRecord =
+
+                    Array.isArray(order.refunds)
+
+                        ? order.refunds.find(
+
+                            (record: any) =>
+
+                                record.requestId ===
+
+                                requestId,
+
+                        )
+
+                        : null;
+
+            }
+
+            if (!refundRecord) {
+
+                refundRecord =
+
+                    Array.isArray(order.refunds)
+
+                        ? order.refunds.find(
+
+                            (record: any) =>
+
+                                record.razorpayRefundId ===
+
+                                refundId,
+
+                        )
+
+                        : null;
+
+            }
+
+            // =====================================
+
+            // LEGACY REFUND FALLBACK
+
+            // =====================================
+
+            // Keeps old order-level refunds working.
+
+            // New product-level refunds should always
+
+            // have an order.refunds[] record.
+
+            if (!refundRecord) {
+
+                console.warn(
+
+                    "Razorpay refund webhook: no matching refund record.",
+
+                    {
+
+                        orderId:
+
+                            order._id.toString(),
+
+                        refundId,
+
+                        paymentId,
+
+                        requestId,
+
+                    },
+
+                );
+
+                // Preserve event-id duplicate protection.
+
+                if (eventId) {
+
+                    const existingIds =
+
+                        Array.isArray(
+
+                            order.refundWebhookEventIds,
+
+                        )
+
+                            ? order.refundWebhookEventIds
+
+                            : [];
+
+                    if (
+
+                        !existingIds.includes(
+
+                            eventId,
+
+                        )
+
+                    ) {
+
+                        order.refundWebhookEventIds =
+
+                            [
+
+                                ...existingIds,
+
+                                eventId,
+
+                            ];
+
+                    }
+
+                }
+
+                // Legacy order-level handling only
+
+                // when the webhook itself identifies
+
+                // the existing legacy refund.
+
+                if (
+
+                    order.refundId === refundId
+
+                ) {
+
+                    order.refundStatus =
+
+                        finalStatus;
+
+                    order.refundId =
+
+                        refundId;
+
+                    if (
+
+                        finalStatus ===
+
+                        RefundStatus.PROCESSED
+
+                    ) {
+
+                        order.refundedAmount =
+
+                            roundMoney(
+
+                                Number(
+
+                                    order.refundedAmount ||
+
+                                    0,
+
+                                ) +
+
+                                refundAmount,
+
+                            );
+
+                        order.refundedAt =
+
+                            order.refundedAt ||
+
+                            new Date();
+
+                    }
+
+                    await order.save();
+
+                    return res.status(200).json({
+
+                        success: true,
+
+                        message:
+
+                            "Legacy refund webhook processed.",
+
+                    });
+
+                }
+
+                await order.save();
+
+                return res.status(200).json({
+
+                    success: true,
+
+                    message:
+
+                        "Refund record not found; webhook acknowledged.",
+
+                });
+
+            }
+
+            // =====================================
+
+            // REFUND RECORD STATE
+
+            // =====================================
+
+            const previousStatus =
+
+                refundRecord.status as RefundStatus;
+
+            const amountForRecord =
+
+                roundMoney(
+
+                    Number(
+
+                        refundRecord.amount || 0,
+
+                    ),
+
+                );
+
+            const effectiveAmount =
+
+                amountForRecord > 0
+
+                    ? amountForRecord
+
+                    : refundAmount;
+
+            // =====================================
+
+            // IDENTIFIERS
+
+            // =====================================
+
+            refundRecord.razorpayRefundId =
+
+                refundId;
+
+            refundRecord.razorpayPaymentId =
+
+                paymentId;
+
+            // =====================================
+
+            // PROTECT AGAINST OUT-OF-ORDER EVENTS
+
+            // =====================================
+
+            // Processed is final for this refund.
+
+            // A later pending/failed event must not
+
+            // downgrade a processed refund.
+
+            // Failed is also treated as final for
+
+            // this refund record. A new refund attempt
+
+            // should create a new refund request ID.
+
+            let nextStatus =
+
+                finalStatus;
 
             if (
-                event ===
-                "refund.processed" ||
-                refundStatus === "processed"
+
+                previousStatus ===
+
+                RefundStatus.PROCESSED &&
+
+                finalStatus !==
+
+                RefundStatus.PROCESSED
+
             ) {
 
-                finalStatus =
+                nextStatus =
+
                     RefundStatus.PROCESSED;
 
             } else if (
-                event ===
-                "refund.failed" ||
-                refundStatus === "failed"
+
+                previousStatus ===
+
+                RefundStatus.FAILED &&
+
+                finalStatus ===
+
+                RefundStatus.PENDING
+
             ) {
 
-                finalStatus =
+                nextStatus =
+
                     RefundStatus.FAILED;
 
-            } else {
-
-                finalStatus =
-                    RefundStatus.PENDING;
             }
 
-            // =====================================
-            // UPDATE ORDER
+            const transitionedToPending =
+
+                previousStatus !==
+
+                RefundStatus.PENDING &&
+
+                previousStatus !==
+
+                RefundStatus.PROCESSED &&
+
+                previousStatus !==
+
+                RefundStatus.FAILED &&
+
+                nextStatus ===
+
+                RefundStatus.PENDING;
+
+            const transitionedToProcessed =
+
+                previousStatus !==
+
+                RefundStatus.PROCESSED &&
+
+                nextStatus ===
+
+                RefundStatus.PROCESSED;
+
+            const transitionedToFailed =
+
+                previousStatus !==
+
+                RefundStatus.FAILED &&
+
+                previousStatus !==
+
+                RefundStatus.PROCESSED &&
+
+                nextStatus ===
+
+                RefundStatus.FAILED;
+
+            refundRecord.status =
+
+                nextStatus;
+
             // =====================================
 
-            order.refundStatus =
-                finalStatus;
+            // REFUND TIMESTAMPS / FAILURE REASON
 
-            order.refundId =
-                refundId;
+            // =====================================
 
             if (
-                refundAmount > 0
+
+                nextStatus ===
+
+                RefundStatus.PROCESSED
+
             ) {
-                order.refundedAmount =
-                    refundAmount;
-            }
 
-            // Save the first time we receive
-            // the refund event timestamp.
-            if (!order.refundedAt) {
-                order.refundedAt =
+                refundRecord.processedAt =
+
+                    refundRecord.processedAt ||
+
                     new Date();
+
+                refundRecord.failedAt =
+
+                    undefined;
+
+                refundRecord.failureReason =
+
+                    undefined;
+
+            } else if (
+
+                nextStatus ===
+
+                RefundStatus.FAILED
+
+            ) {
+
+                refundRecord.failedAt =
+
+                    refundRecord.failedAt ||
+
+                    new Date();
+
+                const failureReason =
+
+                    refund?.error_description ||
+
+                    refund?.error_reason ||
+
+                    refund?.error_source ||
+
+                    "Razorpay refund failed";
+
+                refundRecord.failureReason =
+
+                    String(failureReason);
+
             }
 
             // =====================================
-            // EVENT ID
+
+            // AGGREGATE REFUND MONEY
+
             // =====================================
 
-            if (currentEventId) {
+            // Update money ONLY on real state
+
+            // transitions so direct API processing
+
+            // + webhook processing cannot double-count.
+
+            if (transitionedToPending) {
+
+                order.pendingRefundAmount =
+
+                    roundMoney(
+
+                        Number(
+
+                            order.pendingRefundAmount ||
+
+                            0,
+
+                        ) +
+
+                        effectiveAmount,
+
+                    );
+
+            }
+
+            if (transitionedToProcessed) {
+
+                order.pendingRefundAmount =
+
+                    clampNonNegative(
+
+                        Number(
+
+                            order.pendingRefundAmount ||
+
+                            0,
+
+                        ) -
+
+                        effectiveAmount,
+
+                    );
+
+                order.refundedAmount =
+
+                    roundMoney(
+
+                        Number(
+
+                            order.refundedAmount ||
+
+                            0,
+
+                        ) +
+
+                        effectiveAmount,
+
+                    );
+
+                order.refundedAt =
+
+                    order.refundedAt ||
+
+                    new Date();
+
+            }
+
+            if (transitionedToFailed) {
+
+                order.pendingRefundAmount =
+
+                    clampNonNegative(
+
+                        Number(
+
+                            order.pendingRefundAmount ||
+
+                            0,
+
+                        ) -
+
+                        effectiveAmount,
+
+                    );
+
+            }
+
+            // =====================================
+
+            // UPDATE PRODUCT-LEVEL REFUND
+
+            // =====================================
+
+            const itemIndex =
+
+                Number(
+
+                    refundRecord.itemIndex,
+
+                );
+
+            if (
+
+                Number.isInteger(itemIndex) &&
+
+                itemIndex >= 0 &&
+
+                itemIndex <
+
+                order.items.length
+
+            ) {
+
+                const item =
+
+                    order.items[
+
+                    itemIndex
+
+                    ] as any;
+
+                item.refundStatus =
+
+                    nextStatus;
+
+                item.refundAmount =
+
+                    effectiveAmount;
+
+                item.refundId =
+
+                    refundId;
+
+                if (
+
+                    nextStatus ===
+
+                    RefundStatus.PROCESSED
+
+                ) {
+
+                    item.refundedAt =
+
+                        item.refundedAt ||
+
+                        new Date();
+
+                }
+
+            }
+
+            // =====================================
+
+            // ORDER-LEVEL REFUND METADATA
+
+            // =====================================
+
+            // Keep refundId as the latest Razorpay
+
+            // refund ID for backward compatibility.
+
+            order.refundId =
+
+                refundId;
+
+            recalculateAggregateRefundStatus(
+
+                order,
+
+            );
+
+            // =====================================
+
+            // EVENT ID
+
+            // =====================================
+
+            if (eventId) {
 
                 const existingIds =
+
                     Array.isArray(
-                        (order as any)
-                            .refundWebhookEventIds,
+
+                        order.refundWebhookEventIds,
+
                     )
-                        ? (order as any)
-                            .refundWebhookEventIds
+
+                        ? order.refundWebhookEventIds
+
                         : [];
 
                 if (
+
                     !existingIds.includes(
-                        currentEventId,
+
+                        eventId,
+
                     )
+
                 ) {
-                    (order as any)
-                        .refundWebhookEventIds
-                        .push(
-                            currentEventId,
-                        );
+
+                    order.refundWebhookEventIds =
+
+                        [
+
+                            ...existingIds,
+
+                            eventId,
+
+                        ];
+
                 }
+
             }
+
+            // =====================================
+
+            // SAVE
+
+            // =====================================
 
             await order.save();
 
+            // =====================================
+
+            // CUSTOMER REFUND NOTIFICATION
+
+            // =====================================
+
+            // Notification creation must never make
+
+            // the Razorpay webhook fail after the
+
+            // refund/order state has already been saved.
+
+            if (transitionedToProcessed) {
+
+                try {
+
+                    await NotificationService.create({
+
+                        userId: String(
+
+                            order.user,
+
+                        ),
+
+                        recipientRole:
+
+                            NotificationRecipientRole.CUSTOMER,
+
+                        type:
+
+                            NotificationType.REFUND_PROCESSED,
+
+                        title:
+
+                            "Refund Processed",
+
+                        message:
+
+                            `Your refund of ₹${effectiveAmount.toFixed(
+
+                                2,
+
+                            )} has been processed by Razorpay.`,
+
+                        orderId:
+
+                            order._id,
+
+                    });
+
+                } catch (notificationError) {
+
+                    console.error(
+
+                        "REFUND PROCESSED NOTIFICATION ERROR:",
+
+                        notificationError,
+
+                    );
+
+                }
+
+            }
+
+            if (transitionedToFailed) {
+
+                try {
+
+                    await NotificationService.create({
+
+                        userId: String(
+
+                            order.user,
+
+                        ),
+
+                        recipientRole:
+
+                            NotificationRecipientRole.CUSTOMER,
+
+                        type:
+
+                            NotificationType.REFUND_FAILED,
+
+                        title:
+
+                            "Refund Failed",
+
+                        message:
+
+                            `Your refund of ₹${effectiveAmount.toFixed(
+
+                                2,
+
+                            )} could not be processed. Please check your order details.`,
+
+                        orderId:
+
+                            order._id,
+
+                    });
+
+                } catch (notificationError) {
+
+                    console.error(
+
+                        "REFUND FAILED NOTIFICATION ERROR:",
+
+                        notificationError,
+
+                    );
+
+                }
+
+            }
+
             console.log(
+
                 "✅ REFUND WEBHOOK PROCESSED:",
+
                 {
+
                     orderId:
+
                         order._id.toString(),
+
+                    requestId:
+
+                        refundRecord.requestId,
 
                     refundId,
 
                     paymentId,
 
                     amount:
-                        refundAmount,
+
+                        effectiveAmount,
+
+                    previousStatus,
 
                     status:
-                        finalStatus,
+
+                        nextStatus,
+
+                    transitionedToPending,
+
+                    transitionedToProcessed,
+
+                    transitionedToFailed,
+
                 },
+
             );
 
             return res.status(200).json({
+
                 success: true,
+
                 message:
+
                     "Refund webhook processed successfully.",
+
+                data: {
+
+                    orderId: order._id,
+
+                    requestId:
+
+                        refundRecord.requestId,
+
+                    refundId,
+
+                    status:
+
+                        nextStatus,
+
+                    amount:
+
+                        effectiveAmount,
+
+                },
+
             });
 
         } catch (error) {
 
             console.error(
+
                 "❌ RAZORPAY WEBHOOK ERROR:",
+
                 error,
+
             );
 
             return res.status(500).json({
+
                 success: false,
+
                 message:
+
                     "Webhook processing failed.",
+
             });
+
         }
+
     }
+
 }

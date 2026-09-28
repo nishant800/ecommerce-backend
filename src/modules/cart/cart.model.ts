@@ -3,37 +3,29 @@ import mongoose, {
     Document,
     Model,
 } from "mongoose";
-
 export type CartOptionType =
     | "size"
     | "shade"
     | "color"
     | "";
-
 export interface ICartItem {
     product: mongoose.Types.ObjectId;
-
     // Selected product variant.
     variantId?: string;
-
     // Selected child option inside the variant.
     // size  -> bangles
     // shade -> cosmetics
     // color -> watches
     optionType?: CartOptionType;
-
     optionValue?: string;
-
     quantity: number;
 }
-
 export interface ICart extends Document {
     user: mongoose.Types.ObjectId;
     items: ICartItem[];
     createdAt: Date;
     updatedAt: Date;
 }
-
 const CartItemSchema =
     new Schema<ICartItem>(
         {
@@ -42,13 +34,11 @@ const CartItemSchema =
                 ref: "Product",
                 required: true,
             },
-
             variantId: {
                 type: String,
                 default: "",
                 trim: true,
             },
-
             optionType: {
                 type: String,
                 enum: [
@@ -59,13 +49,11 @@ const CartItemSchema =
                 ],
                 default: "",
             },
-
             optionValue: {
                 type: String,
                 default: "",
                 trim: true,
             },
-
             quantity: {
                 type: Number,
                 required: true,
@@ -77,7 +65,6 @@ const CartItemSchema =
             _id: false,
         },
     );
-
 const CartSchema =
     new Schema<ICart>(
         {
@@ -88,7 +75,6 @@ const CartSchema =
                 unique: true,
                 index: true,
             },
-
             items: {
                 type: [CartItemSchema],
                 default: [],
@@ -98,7 +84,6 @@ const CartSchema =
             timestamps: true,
         },
     );
-
 // Prevent model overwrite during development.
 const Cart: Model<ICart> =
     mongoose.models.Cart ||
@@ -106,5 +91,4 @@ const Cart: Model<ICart> =
         "Cart",
         CartSchema,
     );
-
 export default Cart;

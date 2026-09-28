@@ -3,37 +3,48 @@ import {
     createOrder,
     OrderController,
 } from "../modules/orders/order.controller.js";
-
 import { authenticate } from "../middleware/auth.middleware.js";
-
 const router = Router();
-
-// Create Order
+// =========================================
+// CREATE ORDER
+// =========================================
 router.post(
     "/",
     authenticate,
     createOrder
 );
-
-// Get My Orders
+// =========================================
+// GET MY ORDERS
+// =========================================
 router.get(
     "/",
     authenticate,
     OrderController.getMyOrders
 );
-
-// Get Order Details
+// =========================================
+// GET ORDER DETAILS
+// =========================================
 router.get(
     "/:id",
     authenticate,
     OrderController.getOrder
 );
-
-// Cancel Order
+// =========================================
+// CANCEL SINGLE PRODUCT / ITEM
+// PATCH /orders/:id/items/:itemIndex/cancel
+// =========================================
+router.patch(
+    "/:id/items/:itemIndex/cancel",
+    authenticate,
+    OrderController.cancelItem
+);
+// =========================================
+// CANCEL ENTIRE ORDER
+// PATCH /orders/:id/cancel
+// =========================================
 router.patch(
     "/:id/cancel",
     authenticate,
     OrderController.cancel
 );
-
 export default router;

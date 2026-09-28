@@ -1,17 +1,11 @@
 import { Router } from "express";
-
 import { ProductController } from "./product.controller.js";
-
 import { authenticate } from "../../middleware/auth.middleware.js";
 import { sellerOnly } from "../../middleware/seller.middleware.js";
-
 const router = Router();
-
-
 // =========================================
 // SELLER PRODUCT ROUTES
 // =========================================
-
 // Get products belonging to logged-in seller
 // IMPORTANT: /my must come BEFORE /:id
 router.get(
@@ -20,8 +14,6 @@ router.get(
     sellerOnly,
     ProductController.getMyProducts
 );
-
-
 // Create product
 router.post(
     "/",
@@ -29,8 +21,6 @@ router.post(
     sellerOnly,
     ProductController.create
 );
-
-
 // Update product
 router.put(
     "/:id",
@@ -38,8 +28,6 @@ router.put(
     sellerOnly,
     ProductController.update
 );
-
-
 // Delete product
 router.delete(
     "/:id",
@@ -47,23 +35,17 @@ router.delete(
     sellerOnly,
     ProductController.delete
 );
-
-
 // =========================================
 // PUBLIC PRODUCT ROUTES
 // =========================================
-
 // Get all products
 router.get(
     "/",
     ProductController.getAll
 );
-
-
 // Get product by ID
 router.get(
     "/:id",
     ProductController.getById
 );
-
 export default router;

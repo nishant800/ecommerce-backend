@@ -2,9 +2,7 @@ import mongoose from "mongoose";
 import dotenv from "dotenv";
 import Category from "../categories/category.model.js";
 import Subcategory from "./subcategory.model.js";
-
 dotenv.config();
-
 const slugify = (value: string) =>
     value
         .trim()
@@ -12,7 +10,6 @@ const slugify = (value: string) =>
         .replace(/&/g, "and")
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-+|-+$/g, "");
-
 const subcategoryData: Record<
     string,
     string[]
@@ -36,7 +33,6 @@ const subcategoryData: Record<
         "Kids Bangles",
         "Bangle Sets",
     ],
-
     Watches: [
         "Analog Watches",
         "Digital Watches",
@@ -57,7 +53,6 @@ const subcategoryData: Record<
         "Automatic Watches",
         "Quartz Watches",
     ],
-
     Cosmetics: [
         "Makeup",
         "Lipstick",
@@ -114,22 +109,17 @@ const subcategoryData: Record<
         "Beauty Accessories",
     ],
 };
-
 const seed = async () => {
     const uri = process.env.MONGODB_URI;
-
     if (!uri) {
         throw new Error(
             "MONGODB_URI is not defined"
         );
     }
-
     await mongoose.connect(uri);
-
     let created = 0;
     let skipped = 0;
     let missingCategories = 0;
-
     for (
         const [categoryName, names]
         of Object.entries(
@@ -144,7 +134,6 @@ const seed = async () => {
                     $options: "i",
                 },
             });
-
         if (!category) {
             console.warn(
                 `Category not found: ${categoryName}`
@@ -152,23 +141,19 @@ const seed = async () => {
             missingCategories++;
             continue;
         }
-
         for (const name of names) {
             const slug =
                 slugify(name);
-
             const existing =
                 await Subcategory.findOne({
                     category:
                         category._id,
                     slug,
                 });
-
             if (existing) {
                 skipped++;
                 continue;
             }
-
             await Subcategory.create({
                 name,
                 slug,
@@ -178,32 +163,26 @@ const seed = async () => {
                     category._id,
                 isActive: true,
             });
-
             created++;
             console.log(
                 `Created: ${category.name} → ${name}`
             );
         }
     }
-
     console.log(
         `\nDone. Created: ${created}, skipped: ${skipped}, missing categories: ${missingCategories}`
     );
-
     await mongoose.disconnect();
 };
-
 seed().catch(
     async (error) => {
         console.error(
             "Subcategory seed failed:",
             error
         );
-
         try {
             await mongoose.disconnect();
         } catch { }
-
         process.exit(1);
     }
 );

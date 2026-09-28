@@ -5,9 +5,10 @@ import Order, {
 } from "../orders/order.model.js";
 import crypto from "crypto";
 import Cart from "../cart/cart.model.js";
-import Product from "../products/product.model.js";
-
 export class PaymentService {
+    // =========================================
+    // CREATE RAZORPAY ORDER
+    // =========================================
     static async createPayment(
         orderId: string,
         userId: string
@@ -15,46 +16,44 @@ export class PaymentService {
         console.log("================================");
         console.log("Received orderId:", orderId);
         console.log("Received userId:", userId);
-
         const order = await Order.findOne({
             _id: orderId,
             user: userId,
         });
-
-        console.log("Found order:", order);
-
+        console.log("Found order:", order?._id?.toString());
         if (!order) {
             throw new Error("Order not found");
         }
-
         if (order.paymentStatus === PaymentStatus.SUCCESS) {
             throw new Error("Order already paid");
         }
-
-        if (order.orderStatus === OrderStatus.CANCELLED) {
+        if (
+            order.orderStatus === OrderStatus.CANCELLED ||
+            order.orderStatus === OrderStatus.PARTIALLY_CANCELLED
+        ) {
             throw new Error(
                 "Cancelled orders cannot be paid."
             );
         }
-
+        if (!Number.isFinite(Number(order.total)) || Number(order.total) <= 0) {
+            throw new Error("Invalid order amount.");
+        }
         try {
             const razorpayOrder =
                 await razorpay.orders.create({
-                    amount: Math.round(order.total * 100),
+                    amount: Math.round(
+                        Number(order.total) * 100
+                    ),
                     currency: "INR",
                     receipt: order._id.toString(),
                 });
-
             order.razorpayOrderId =
                 razorpayOrder.id;
-
             await order.save();
-
             console.log(
-                "Razorpay Order Created:",
+                "✅ Razorpay Order Created:",
                 razorpayOrder.id
             );
-
             return {
                 order,
                 razorpayOrder,
@@ -62,29 +61,40 @@ export class PaymentService {
             };
         } catch (err) {
             console.error(
-                "RAZORPAY ERROR:",
+                "RAZORPAY CREATE ORDER ERROR:",
                 err
             );
-
             throw err;
         }
     }
-
-    static async verifyPayment(data: {
-        razorpay_order_id: string;
-        razorpay_payment_id: string;
-        razorpay_signature: string;
-    }, userId: string) {
+    // =========================================
+    // VERIFY RAZORPAY PAYMENT
+    // =========================================
+    static async verifyPayment(
+        data: {
+            razorpay_order_id: string;
+            razorpay_payment_id: string;
+            razorpay_signature: string;
+        },
+        userId: string
+    ) {
         const {
             razorpay_order_id,
             razorpay_payment_id,
             razorpay_signature,
         } = data;
-
+        if (
+            !razorpay_order_id ||
+            !razorpay_payment_id ||
+            !razorpay_signature
+        ) {
+            throw new Error(
+                "Incomplete Razorpay payment verification data."
+            );
+        }
         // =====================================
-        // VERIFY RAZORPAY SIGNATURE
+        // VERIFY SIGNATURE
         // =====================================
-
         const generatedSignature = crypto
             .createHmac(
                 "sha256",
@@ -94,7 +104,6 @@ export class PaymentService {
                 `${razorpay_order_id}|${razorpay_payment_id}`
             )
             .digest("hex");
-
         if (
             generatedSignature !==
             razorpay_signature
@@ -103,87 +112,165 @@ export class PaymentService {
                 "Invalid payment signature"
             );
         }
-
         // =====================================
-        // FIND ORDER BELONGING TO USER
+        // FIND LOCAL ORDER
         // =====================================
-
         const order = await Order.findOne({
             razorpayOrderId:
                 razorpay_order_id,
             user: userId,
         });
-
         if (!order) {
             throw new Error("Order not found");
         }
-
         // =====================================
-        // ALREADY PAID
+        // IDEMPOTENT SUCCESS
         // =====================================
-
         if (
             order.paymentStatus ===
             PaymentStatus.SUCCESS
         ) {
+            // The signature was already verified above.
+            // Returning the existing paid order makes
+            // safe client retries possible.
+            return order;
+        }
+        // =====================================
+        // VERIFY PAYMENT WITH RAZORPAY
+        // =====================================
+        //
+        // Signature validation proves the callback was
+        // generated for these IDs, while fetching the
+        // payment lets the backend verify the actual
+        // payment/order relationship and captured amount.
+        // =====================================
+        const razorpayPayment =
+            await razorpay.payments.fetch(
+                razorpay_payment_id
+            );
+        if (!razorpayPayment) {
             throw new Error(
-                "Payment already verified"
+                "Razorpay payment could not be found."
             );
         }
-
+        if (
+            String(
+                razorpayPayment.order_id || ""
+            ) !==
+            String(razorpay_order_id)
+        ) {
+            throw new Error(
+                "Razorpay payment does not belong to this order."
+            );
+        }
+        if (
+            String(
+                razorpayPayment.status || ""
+            ).toLowerCase() !== "captured"
+        ) {
+            throw new Error(
+                `Payment is not captured. Current Razorpay status: ${razorpayPayment.status || "unknown"}`
+            );
+        }
+        const expectedAmountPaise =
+            Math.round(
+                Number(order.total) * 100
+            );
+        const actualAmountPaise =
+            Number(
+                razorpayPayment.amount
+            );
+        if (
+            !Number.isFinite(actualAmountPaise) ||
+            actualAmountPaise !==
+            expectedAmountPaise
+        ) {
+            throw new Error(
+                "Razorpay payment amount does not match the order amount."
+            );
+        }
+        if (
+            String(
+                razorpayPayment.currency || ""
+            ).toUpperCase() !== "INR"
+        ) {
+            throw new Error(
+                "Unexpected payment currency."
+            );
+        }
         // =====================================
         // UPDATE ORDER
         // =====================================
-
         order.paymentStatus =
             PaymentStatus.SUCCESS;
-
         order.razorpayPaymentId =
             razorpay_payment_id;
-
         order.razorpaySignature =
             razorpay_signature;
-
         await order.save();
-
-        // Reduce Product Stock
-        for (const item of order.items) {
-            await Product.findByIdAndUpdate(
-                item.product,
-                {
-                    $inc: {
-                        stock: -item.quantity,
-                    },
-                }
-            );
-        }
-
-        // Clear Cart
+        // =====================================
+        // IMPORTANT STOCK RULE
+        // =====================================
+        //
+        // DO NOT reduce product stock here.
+        //
+        // The current checkout controller already
+        // reserves/deducts stock while creating the
+        // order. Reducing stock again during payment
+        // verification would double-deduct inventory.
+        //
+        // Cancellation will restore the exact cancelled
+        // quantity later.
+        // =====================================
+        // =====================================
+        // CLEAR CART
+        // =====================================
         await Cart.findOneAndUpdate(
             { user: order.user },
             {
                 items: [],
             }
         );
-
+        console.log(
+            "✅ PAYMENT VERIFIED:",
+            {
+                orderId:
+                    order._id.toString(),
+                paymentId:
+                    razorpay_payment_id,
+                amount:
+                    Number(order.total),
+            }
+        );
         return order;
     }
-
     // =========================================
     // CREATE RAZORPAY REFUND
     // =========================================
-
+    //
+    // refundRequestId is intentionally used as the
+    // Razorpay receipt value. Razorpay requires the
+    // receipt to be unique for refund requests on a
+    // payment, so this becomes our refund-level
+    // idempotency/reference key.
+    // =========================================
     static async refundPayment(
-        orderId: string,
+        refundRequestId: string,
         razorpayPaymentId: string,
         amount: number,
     ) {
+        const requestId =
+            String(refundRequestId || "").trim();
+        if (!requestId) {
+            throw new Error(
+                "Refund request ID is required."
+            );
+        }
         if (!razorpayPaymentId) {
             throw new Error(
                 "Razorpay payment ID is missing."
             );
         }
-
         if (
             !Number.isFinite(amount) ||
             amount <= 0
@@ -192,80 +279,179 @@ export class PaymentService {
                 "Invalid refund amount."
             );
         }
-
+        const refundAmount =
+            Math.round(Number(amount) * 100);
+        if (refundAmount < 100) {
+            throw new Error(
+                "Refund amount must be at least ₹1."
+            );
+        }
         const keyId =
             process.env.RAZORPAY_KEY_ID;
-
         const keySecret =
             process.env.RAZORPAY_KEY_SECRET;
-
         if (!keyId || !keySecret) {
             throw new Error(
                 "Razorpay credentials are not configured."
             );
         }
-
-        const refundAmount =
-            Math.round(amount * 100);
-
-        // Stable idempotency key for this order.
-        // Retrying the same refund request will not
-        // create a duplicate refund at Razorpay.
-        const idempotencyKey =
-            `refund_${orderId}`;
-
         const authorization =
             Buffer.from(
                 `${keyId}:${keySecret}`,
             ).toString("base64");
-
-        const response = await fetch(
-            `https://api.razorpay.com/v1/payments/${encodeURIComponent(
-                razorpayPaymentId,
-            )}/refund`,
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type":
-                        "application/json",
-                    Authorization:
-                        `Basic ${authorization}`,
-                    "X-Refund-Idempotency":
-                        idempotencyKey,
-                },
-                body: JSON.stringify({
-                    amount: refundAmount,
-                    speed: "normal",
-                    receipt:
-                        `refund-${orderId}`,
-                    notes: {
-                        order_id:
-                            String(orderId),
+        // =====================================
+        // CHECK PAYMENT STATE / REFUND CAPACITY
+        // =====================================
+        const payment =
+            await razorpay.payments.fetch(
+                razorpayPaymentId
+            );
+        if (!payment) {
+            throw new Error(
+                "Razorpay payment could not be found for refund."
+            );
+        }
+        if (
+            String(payment.status || "")
+                .trim()
+                .toLowerCase() !== "captured"
+        ) {
+            throw new Error(
+                `Payment cannot be refunded. Current Razorpay status: ${payment.status || "unknown"}`
+            );
+        }
+        const paymentAmount =
+            Number(payment.amount || 0);
+        const alreadyRefundedAmount =
+            Number(payment.amount_refunded || 0);
+        const availableRefundAmount =
+            paymentAmount -
+            alreadyRefundedAmount;
+        if (
+            refundAmount >
+            availableRefundAmount
+        ) {
+            throw new Error(
+                "Refund amount exceeds the remaining refundable payment amount."
+            );
+        }
+        // =====================================
+        // CREATE REFUND
+        // =====================================
+        //
+        // NOTE:
+        // Razorpay's documented idempotency/reference
+        // field for refunds is `receipt`. We therefore
+        // intentionally do not use an undocumented custom
+        // HTTP idempotency header here.
+        // =====================================
+        const response =
+            await fetch(
+                `https://api.razorpay.com/v1/payments/${encodeURIComponent(
+                    razorpayPaymentId,
+                )}/refund`,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                        Authorization:
+                            `Basic ${authorization}`,
                     },
-                }),
-            },
-        );
-
+                    body: JSON.stringify({
+                        amount:
+                            refundAmount,
+                        speed:
+                            "normal",
+                        receipt:
+                            requestId,
+                        notes: {
+                            refund_request_id:
+                                requestId,
+                        },
+                    }),
+                },
+            );
         const data =
             await response.json();
-
         if (!response.ok) {
             console.error(
                 "RAZORPAY REFUND ERROR:",
                 data,
             );
-
+            // If the receipt was already used, retrieve
+            // existing refunds and return the matching one.
+            // This makes a repeated request safe instead of
+            // creating a second refund.
+            const duplicateReceipt =
+                String(
+                    data?.error?.description || ""
+                )
+                    .toLowerCase()
+                    .includes("duplicate receipt");
+            if (duplicateReceipt) {
+                try {
+                    const existingResponse =
+                        await fetch(
+                            `https://api.razorpay.com/v1/payments/${encodeURIComponent(
+                                razorpayPaymentId,
+                            )}/refunds?count=100`,
+                            {
+                                method: "GET",
+                                headers: {
+                                    Authorization:
+                                        `Basic ${authorization}`,
+                                },
+                            },
+                        );
+                    const existingData =
+                        await existingResponse.json();
+                    if (existingResponse.ok) {
+                        const existingRefund =
+                            Array.isArray(
+                                existingData?.items
+                            )
+                                ? existingData.items.find(
+                                    (refund: any) =>
+                                        String(
+                                            refund?.receipt || ""
+                                        ) === requestId
+                                )
+                                : null;
+                        if (existingRefund) {
+                            console.log(
+                                "ℹ️ Existing Razorpay refund reused:",
+                                existingRefund.id,
+                            );
+                            return existingRefund;
+                        }
+                    }
+                } catch (lookupError) {
+                    console.error(
+                        "Existing refund lookup failed:",
+                        lookupError,
+                    );
+                }
+            }
             throw new Error(
                 data?.error?.description ||
                 "Unable to process Razorpay refund."
             );
         }
-
         console.log(
-            "✅ RAZORPAY REFUND:",
-            data,
+            "✅ RAZORPAY REFUND CREATED:",
+            {
+                id: data?.id,
+                receipt: data?.receipt,
+                paymentId:
+                    data?.payment_id,
+                amount:
+                    Number(data?.amount || 0) /
+                    100,
+                status:
+                    data?.status,
+            },
         );
-
         return data;
     }
 }

@@ -1,5 +1,4 @@
 import mongoose, { Document, Model, Schema } from "mongoose";
-
 export interface ICoupon extends Document {
     code: string;
     description?: string;
@@ -10,7 +9,6 @@ export interface ICoupon extends Document {
     usedCount: number;
     isActive: boolean;
 }
-
 const couponSchema = new Schema<ICoupon>(
     {
         code: {
@@ -54,7 +52,5 @@ const couponSchema = new Schema<ICoupon>(
         timestamps: true,
     }
 );
-
 const Coupon: Model<ICoupon> = mongoose.model<ICoupon>("Coupon", couponSchema);
-
 export default Coupon;

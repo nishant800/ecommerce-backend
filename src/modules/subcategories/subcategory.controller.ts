@@ -2,13 +2,10 @@ import {
     Request,
     Response,
 } from "express";
-
 import {
     SubcategoryService,
 } from "./subcategory.service.js";
-
 export class SubcategoryController {
-
     static async create(
         req: Request,
         res: Response
@@ -18,7 +15,6 @@ export class SubcategoryController {
                 await SubcategoryService.create(
                     req.body
                 );
-
             return res.status(201).json({
                 success: true,
                 data: subcategory,
@@ -31,7 +27,6 @@ export class SubcategoryController {
             });
         }
     }
-
     static async getAll(
         req: Request,
         res: Response
@@ -43,12 +38,10 @@ export class SubcategoryController {
                         req.query.category
                     )
                     : undefined;
-
             const subcategories =
                 await SubcategoryService.getAll(
                     category
                 );
-
             return res.json({
                 success: true,
                 data: subcategories,
@@ -62,7 +55,6 @@ export class SubcategoryController {
             });
         }
     }
-
     static async getById(
         req: Request,
         res: Response
@@ -74,7 +66,6 @@ export class SubcategoryController {
                         req.params.id
                     )
                 );
-
             if (!subcategory) {
                 return res.status(404).json({
                     success: false,
@@ -82,7 +73,6 @@ export class SubcategoryController {
                         "Subcategory not found",
                 });
             }
-
             return res.json({
                 success: true,
                 data: subcategory,
@@ -96,7 +86,6 @@ export class SubcategoryController {
             });
         }
     }
-
     static async update(
         req: Request,
         res: Response
@@ -109,7 +98,6 @@ export class SubcategoryController {
                     ),
                     req.body
                 );
-
             if (!subcategory) {
                 return res.status(404).json({
                     success: false,
@@ -117,7 +105,6 @@ export class SubcategoryController {
                         "Subcategory not found",
                 });
             }
-
             return res.status(200).json({
                 success: true,
                 data: subcategory,
@@ -130,7 +117,6 @@ export class SubcategoryController {
             });
         }
     }
-
     static async delete(
         req: Request,
         res: Response
@@ -142,7 +128,6 @@ export class SubcategoryController {
                         req.params.id
                     )
                 );
-
             if (!subcategory) {
                 return res.status(404).json({
                     success: false,
@@ -150,7 +135,6 @@ export class SubcategoryController {
                         "Subcategory not found",
                 });
             }
-
             return res.json({
                 success: true,
                 message:

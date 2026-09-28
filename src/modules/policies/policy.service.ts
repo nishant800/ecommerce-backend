@@ -1,47 +1,33 @@
 import {
     PolicyType,
 } from "./policy.model.js";
-
 import {
     STATIC_POLICIES,
 } from "./policy.constants.js";
-
-
 // =========================================
 // POLICY SERVICE
 // =========================================
-
 export class PolicyService {
-
-
     // =========================================
     // GET POLICY
     // =========================================
-
     static async getActivePolicy(
         type: PolicyType,
     ) {
-
         const policy =
             STATIC_POLICIES[type];
-
         if (
             !policy ||
             !policy.active
         ) {
             return null;
         }
-
         return policy;
     }
-
-
     // =========================================
     // GET ALL POLICIES
     // =========================================
-
     static async getAllActivePolicies() {
-
         return Object.values(
             STATIC_POLICIES,
         ).filter(
@@ -49,8 +35,6 @@ export class PolicyService {
                 policy.active,
         );
     }
-
-
     // =========================================
     // CREATE POLICY
     //
@@ -58,7 +42,6 @@ export class PolicyService {
     // Customer-facing policies are no longer
     // read from MongoDB.
     // =========================================
-
     static async create(
         data: {
             type: PolicyType;
@@ -67,7 +50,6 @@ export class PolicyService {
             version?: string;
         },
     ) {
-
         return {
             ...data,
             version:
@@ -76,15 +58,12 @@ export class PolicyService {
             active: true,
         };
     }
-
-
     // =========================================
     // UPDATE POLICY
     //
     // Customer-facing policy content is controlled
     // by policy.constants.ts.
     // =========================================
-
     static async update(
         type: PolicyType,
         data: {
@@ -94,7 +73,6 @@ export class PolicyService {
             active?: boolean;
         },
     ) {
-
         throw new Error(
             `Static policy "${type}" is managed in policy.constants.ts.`,
         );

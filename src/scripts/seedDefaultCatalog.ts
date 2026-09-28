@@ -1,6 +1,5 @@
 import Brand from "../modules/brands/brand.model.js";
 import Category from "../modules/categories/category.model.js";
-
 const categories = [
     {
         name: "Bangles",
@@ -18,7 +17,6 @@ const categories = [
         description: "Makeup, skincare, and beauty products.",
     },
 ];
-
 const brands = [
     {
         name: "Unbranded",
@@ -26,7 +24,6 @@ const brands = [
         description: "Products without a manufacturer brand.",
     },
 ];
-
 /** Adds the basic seller catalogue without changing existing catalogue records. */
 export const seedDefaultCatalog = async () => {
     await Promise.all(
@@ -38,7 +35,6 @@ export const seedDefaultCatalog = async () => {
             ),
         ),
     );
-
     await Promise.all(
         brands.map(brand =>
             Brand.updateOne(

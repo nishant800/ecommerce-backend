@@ -1,13 +1,13 @@
 import { Router } from "express";
 import { PaymentController } from "./payment.controller.js";
+import { PaymentMethodController } from "./payment-method.controller.js";
 import { authenticate } from "../../middleware/auth.middleware.js";
-
 const router = Router();
-
 router.use(authenticate);
-
-// Create Razorpay Order
+router.get("/methods", PaymentMethodController.getMethods);
+router.post("/methods", PaymentMethodController.addMethod);
+router.patch("/methods/:id/default", PaymentMethodController.setDefault);
+router.delete("/methods/:id", PaymentMethodController.deleteMethod);
 router.post("/create", PaymentController.createPayment);
 router.post("/verify", PaymentController.verifyPayment);
-
 export default router;

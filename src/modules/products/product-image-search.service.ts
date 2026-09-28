@@ -1,7 +1,5 @@
-
 import { pipeline, RawImage } from '@huggingface/transformers';
 import Product from './product.model.js';
-
 interface ImageSearchMatch {
     product: any;
     score: number;
@@ -9,9 +7,7 @@ interface ImageSearchMatch {
     matchedImageType: string;
     matchedVariantIndex: number | null;
 }
-
 let extractorPromise: Promise<any> | null = null;
-
 const getExtractor = async () => {
     if (!extractorPromise) {
         extractorPromise = pipeline(
@@ -20,29 +16,22 @@ const getExtractor = async () => {
             'Xenova/clip-vit-base-patch32',
         );
     }
-
     return extractorPromise;
 };
-
 const toFiniteNumber = (value: unknown) => {
     const number = Number(value);
     return Number.isFinite(number) ? number : 0;
 };
-
 const normalizeVector = (values: ArrayLike<number>) => {
     let magnitude = 0;
-
     for (let index = 0; index < values.length; index += 1) {
         const value = toFiniteNumber(values[index]);
         magnitude += value * value;
     }
-
     magnitude = Math.sqrt(magnitude);
-
     if (!magnitude) {
         return [];
     }
-
     return Array.from(
         { length: values.length },
         (_, index) =>
@@ -50,7 +39,6 @@ const normalizeVector = (values: ArrayLike<number>) => {
             magnitude,
     );
 };
-
 const cosineSimilarity = (
     first: number[],
     second: number[],
@@ -61,18 +49,13 @@ const cosineSimilarity = (
     ) {
         return -1;
     }
-
     let score = 0;
-
     for (let index = 0; index < first.length; index += 1) {
         score += first[index] * second[index];
     }
-
     return score;
 };
-
 const embeddingCache = new Map<string, number[]>();
-
 const addImageUrl = (
     urls: string[],
     value: unknown,
@@ -80,20 +63,16 @@ const addImageUrl = (
     if (typeof value !== 'string') {
         return;
     }
-
     const url = value.trim();
-
     if (url && !urls.includes(url)) {
         urls.push(url);
     }
 };
-
 interface ImageCandidate {
     url: string;
     type: string;
     variantIndex: number | null;
 }
-
 const addImageCandidate = (
     candidates: ImageCandidate[],
     urlValue: unknown,
@@ -103,13 +82,10 @@ const addImageCandidate = (
     if (typeof urlValue !== 'string') {
         return;
     }
-
     const url = urlValue.trim();
-
     if (!url) {
         return;
     }
-
     if (
         candidates.some(
             candidate =>
@@ -118,26 +94,22 @@ const addImageCandidate = (
     ) {
         return;
     }
-
     candidates.push({
         url,
         type,
         variantIndex,
     });
 };
-
 const getProductImageCandidates = (
     product: any,
 ) => {
     const candidates: ImageCandidate[] = [];
-
     addImageCandidate(
         candidates,
         product?.thumbnail,
         'thumbnail',
         null,
     );
-
     if (Array.isArray(product?.images)) {
         product.images.forEach(
             (image: any) =>
@@ -151,7 +123,6 @@ const getProductImageCandidates = (
                 ),
         );
     }
-
     if (Array.isArray(product?.variants)) {
         product.variants.forEach(
             (variant: any, variantIndex: number) => {
@@ -161,14 +132,12 @@ const getProductImageCandidates = (
                     'variant-color',
                     variantIndex,
                 );
-
                 addImageCandidate(
                     candidates,
                     variant?.image,
                     'variant',
                     variantIndex,
                 );
-
                 if (
                     Array.isArray(
                         variant?.shades,
@@ -184,7 +153,6 @@ const getProductImageCandidates = (
                             ),
                     );
                 }
-
                 if (
                     Array.isArray(
                         variant?.colors,
@@ -203,15 +171,12 @@ const getProductImageCandidates = (
             },
         );
     }
-
     return candidates;
 };
-
 const extractEmbedding = async (
     image: any,
 ) => {
     const extractor = await getExtractor();
-
     const output =
         await extractor(
             image,
@@ -219,7 +184,6 @@ const extractEmbedding = async (
                 pooling: 'mean',
             },
         );
-
     if (
         !output?.data ||
         typeof output.data.length !== 'number'
@@ -228,43 +192,35 @@ const extractEmbedding = async (
             'Unable to extract image features.',
         );
     }
-
     return normalizeVector(
         output.data,
     );
 };
-
 const getImageEmbedding = async (
     imageUrl: string,
 ) => {
     const cached = embeddingCache.get(
         imageUrl,
     );
-
     if (cached) {
         return cached;
     }
-
     const image =
         await RawImage.read(
             imageUrl,
         );
-
     const embedding =
         await extractEmbedding(
             image,
         );
-
     if (embedding.length) {
         embeddingCache.set(
             imageUrl,
             embedding,
         );
     }
-
     return embedding;
 };
-
 const getEnvNumber = (
     name: string,
     fallback: number,
@@ -272,13 +228,11 @@ const getEnvNumber = (
     const parsed = Number(
         process.env[name],
     );
-
     return Number.isFinite(parsed) &&
         parsed > 0
         ? parsed
         : fallback;
 };
-
 export class ProductImageSearchService {
     static async search(
         buffer: Buffer,
@@ -289,7 +243,6 @@ export class ProductImageSearchService {
                 'Image file is empty.',
             );
         }
-
         const maxProducts =
             Math.floor(
                 getEnvNumber(
@@ -297,7 +250,6 @@ export class ProductImageSearchService {
                     500,
                 ),
             );
-
         const topK =
             Math.floor(
                 getEnvNumber(
@@ -305,33 +257,28 @@ export class ProductImageSearchService {
                     20,
                 ),
             );
-
         const configuredMinimum =
             Number(
                 process.env
                     .IMAGE_SEARCH_MIN_SCORE,
             );
-
         const minimumScore =
             Number.isFinite(
                 configuredMinimum,
             )
                 ? configuredMinimum
                 : 0.55;
-
         const configuredMargin =
             Number(
                 process.env
                     .IMAGE_SEARCH_MIN_MARGIN,
             );
-
         const minimumMargin =
             Number.isFinite(
                 configuredMargin,
             )
                 ? configuredMargin
                 : 0.08;
-
         const blob =
             new Blob(
                 [new Uint8Array(buffer)],
@@ -341,23 +288,19 @@ export class ProductImageSearchService {
                         'image/jpeg',
                 },
             );
-
         const queryImage =
             await RawImage.fromBlob(
                 blob,
             );
-
         const queryEmbedding =
             await extractEmbedding(
                 queryImage,
             );
-
         if (!queryEmbedding.length) {
             throw new Error(
                 'Unable to create image embedding.',
             );
         }
-
         const products =
             await Product.find({
                 active: true,
@@ -367,20 +310,16 @@ export class ProductImageSearchService {
                 .populate('brand')
                 .limit(maxProducts)
                 .lean();
-
         const matches: ImageSearchMatch[] = [];
-
         for (const product of products) {
             const imageCandidates =
                 getProductImageCandidates(
                     product,
                 );
-
             let bestScore = -1;
             let bestCandidate:
                 ImageCandidate | null =
                 null;
-
             for (
                 const candidate
                 of imageCandidates
@@ -390,13 +329,11 @@ export class ProductImageSearchService {
                         await getImageEmbedding(
                             candidate.url,
                         );
-
                     const score =
                         cosineSimilarity(
                             queryEmbedding,
                             embedding,
                         );
-
                     if (
                         score > bestScore
                     ) {
@@ -412,7 +349,6 @@ export class ProductImageSearchService {
                     );
                 }
             }
-
             if (
                 bestCandidate &&
                 bestScore >= minimumScore
@@ -429,20 +365,16 @@ export class ProductImageSearchService {
                 });
             }
         }
-
         matches.sort(
             (first, second) =>
                 second.score -
                 first.score,
         );
-
         if (!matches.length) {
             return [];
         }
-
         const bestScore =
             matches[0].score;
-
         const relevantMatches =
             matches.filter(
                 match =>
@@ -454,7 +386,6 @@ export class ProductImageSearchService {
                     ) <=
                     minimumMargin,
             );
-
         return relevantMatches.slice(
             0,
             topK,

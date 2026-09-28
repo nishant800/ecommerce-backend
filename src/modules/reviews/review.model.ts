@@ -3,7 +3,6 @@ import mongoose, {
     Model,
     Schema,
 } from 'mongoose';
-
 export interface IReview extends Document {
     user: mongoose.Types.ObjectId;
     order: mongoose.Types.ObjectId;
@@ -13,7 +12,6 @@ export interface IReview extends Document {
     createdAt: Date;
     updatedAt: Date;
 }
-
 const ReviewSchema = new Schema<IReview>(
     {
         user: {
@@ -21,26 +19,22 @@ const ReviewSchema = new Schema<IReview>(
             ref: 'User',
             required: true,
         },
-
         order: {
             type: Schema.Types.ObjectId,
             ref: 'Order',
             required: true,
         },
-
         product: {
             type: Schema.Types.ObjectId,
             ref: 'Product',
             required: true,
         },
-
         rating: {
             type: Number,
             required: true,
             min: 1,
             max: 5,
         },
-
         comment: {
             type: String,
             default: '',
@@ -52,7 +46,6 @@ const ReviewSchema = new Schema<IReview>(
         timestamps: true,
     },
 );
-
 ReviewSchema.index(
     {
         user: 1,
@@ -63,16 +56,13 @@ ReviewSchema.index(
         unique: true,
     },
 );
-
 ReviewSchema.index({
     product: 1,
 });
-
 const Review: Model<IReview> =
     mongoose.models.Review ||
     mongoose.model<IReview>(
         'Review',
         ReviewSchema,
     );
-
 export default Review;
