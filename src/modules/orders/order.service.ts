@@ -60,11 +60,22 @@ import {
 // =========================================
 const roundMoney = (value: number) =>
     Math.round((Number(value) || 0) * 100) / 100;
-const isRazorpayPaid = (order: any) =>
-    String(order?.paymentMethod || "")
+const isRazorpayPaid = (order: any) => {
+    const paymentMethod = String(
+        order?.paymentMethod || "",
+    )
         .trim()
-        .toLowerCase() === "razorpay" &&
-    order?.paymentStatus === PaymentStatus.SUCCESS;
+        .toLowerCase();
+
+    return (
+        (
+            paymentMethod === "razorpay" ||
+            paymentMethod === "online"
+        ) &&
+        order?.paymentStatus === PaymentStatus.SUCCESS &&
+        Boolean(order?.razorpayPaymentId)
+    );
+};
 const recalculateAggregateRefundStatus = (order: any) => {
     const refunds = Array.isArray(order?.refunds)
         ? order.refunds
