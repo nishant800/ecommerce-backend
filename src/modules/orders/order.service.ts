@@ -66,7 +66,6 @@ const isRazorpayPaid = (order: any) => {
     )
         .trim()
         .toLowerCase();
-
     return (
         (
             paymentMethod === "razorpay" ||
@@ -658,6 +657,374 @@ export class OrderService {
     // =========================================
     // CANCEL ONE PRODUCT / ORDER ITEM
     // =========================================
+    // =========================================
+    // RECONCILE CANCELLED ORDER AFTER PAYMENT
+    // =========================================
+    //
+    // Handles the payment/cancellation race:
+    //
+    // 1. Customer cancels while payment is still pending.
+    // 2. Cancellation restores stock.
+    // 3. Razorpay payment becomes successful afterward.
+    // 4. This method creates the missing refund.
+    //
+    // Refund requests use the same deterministic IDs as
+    // the normal cancellation flow. Database reservation
+    // is atomic so verify + webhook cannot reserve the
+    // same refund request twice.
+    // =========================================
+    static async reconcileCancelledPaidOrder(
+        orderId: string,
+    ) {
+        const order =
+            await Order.findById(orderId);
+        if (!order) {
+            return null;
+        }
+        if (!isRazorpayPaid(order)) {
+            return order;
+        }
+        if (
+            order.orderStatus !==
+            OrderStatus.CANCELLED &&
+            order.orderStatus !==
+            OrderStatus.PARTIALLY_CANCELLED
+        ) {
+            return order;
+        }
+        const razorpayPaymentId =
+            String(
+                order.razorpayPaymentId || "",
+            ).trim();
+        if (!razorpayPaymentId) {
+            return order;
+        }
+        type RefundRequest = {
+            requestId: string;
+            amount: number;
+            itemIndex: number;
+        };
+        const refundRequests:
+            RefundRequest[] = [];
+        // =====================================
+        // FULLY CANCELLED ORDER
+        // =====================================
+        if (
+            order.orderStatus ===
+            OrderStatus.CANCELLED
+        ) {
+            const alreadyRefunded =
+                roundMoney(
+                    Number(
+                        order.refundedAmount || 0,
+                    ),
+                );
+            const pendingRefund =
+                roundMoney(
+                    Number(
+                        order.pendingRefundAmount || 0,
+                    ),
+                );
+            const remainingRefundableAmount =
+                Math.max(
+                    0,
+                    roundMoney(
+                        Number(order.total || 0) -
+                        alreadyRefunded -
+                        pendingRefund,
+                    ),
+                );
+            if (
+                remainingRefundableAmount > 0
+            ) {
+                const requestId =
+                    `refund_${order._id.toString()}_full`;
+                const reservedOrder =
+                    await Order.findOneAndUpdate(
+                        {
+                            _id: order._id,
+                            orderStatus:
+                                OrderStatus.CANCELLED,
+                            paymentStatus:
+                                PaymentStatus.SUCCESS,
+                            razorpayPaymentId,
+                            "refunds.requestId": {
+                                $ne: requestId,
+                            },
+                        },
+                        {
+                            $inc: {
+                                pendingRefundAmount:
+                                    remainingRefundableAmount,
+                            },
+                            $set: {
+                                refundStatus:
+                                    RefundStatus.PENDING,
+                            },
+                            $push: {
+                                refunds: {
+                                    requestId,
+                                    itemIndex: -1,
+                                    amount:
+                                        remainingRefundableAmount,
+                                    status:
+                                        RefundStatus.PENDING,
+                                    razorpayRefundId:
+                                        "",
+                                    razorpayPaymentId,
+                                    requestedAt:
+                                        new Date(),
+                                },
+                            },
+                        },
+                        {
+                            new: true,
+                        },
+                    );
+                if (reservedOrder) {
+                    refundRequests.push({
+                        requestId,
+                        amount:
+                            remainingRefundableAmount,
+                        itemIndex: -1,
+                    });
+                }
+            }
+        }
+        // =====================================
+        // PARTIALLY CANCELLED ORDER
+        // =====================================
+        if (
+            order.orderStatus ===
+            OrderStatus.PARTIALLY_CANCELLED
+        ) {
+            let remainingRefundableAmount =
+                Math.max(
+                    0,
+                    roundMoney(
+                        Number(order.total || 0) -
+                        Number(
+                            order.refundedAmount ||
+                            0,
+                        ) -
+                        Number(
+                            order.pendingRefundAmount ||
+                            0,
+                        ),
+                    ),
+                );
+            for (
+                let itemIndex = 0;
+                itemIndex < order.items.length;
+                itemIndex++
+            ) {
+                if (
+                    remainingRefundableAmount <= 0
+                ) {
+                    break;
+                }
+                const item: any =
+                    order.items[itemIndex];
+                const orderedQuantity =
+                    Number(
+                        item.quantity || 0,
+                    );
+                const cancelledQuantity =
+                    Math.min(
+                        orderedQuantity,
+                        Number(
+                            item.cancelledQuantity ||
+                            0,
+                        ),
+                    );
+                if (
+                    cancelledQuantity <= 0
+                ) {
+                    continue;
+                }
+                const requestId =
+                    `refund_${order._id.toString()}_item_${itemIndex}`;
+                const existingRefund =
+                    Array.isArray(
+                        order.refunds,
+                    ) &&
+                    order.refunds.some(
+                        (refund: any) =>
+                            refund.requestId ===
+                            requestId,
+                    );
+                if (
+                    existingRefund ||
+                    String(
+                        item.refundRequestId ||
+                        "",
+                    ).trim()
+                ) {
+                    continue;
+                }
+                const lineRefundAmount =
+                    roundMoney(
+                        Number(
+                            item.price || 0,
+                        ) *
+                        cancelledQuantity,
+                    );
+                const refundAmount =
+                    Math.min(
+                        lineRefundAmount,
+                        remainingRefundableAmount,
+                    );
+                if (refundAmount <= 0) {
+                    continue;
+                }
+                const refundRequestIdPath =
+                    `items.${itemIndex}.refundRequestId`;
+                const refundStatusPath =
+                    `items.${itemIndex}.refundStatus`;
+                const refundAmountPath =
+                    `items.${itemIndex}.refundAmount`;
+                const reservedOrder =
+                    await Order.findOneAndUpdate(
+                        {
+                            _id: order._id,
+                            orderStatus:
+                                OrderStatus.PARTIALLY_CANCELLED,
+                            paymentStatus:
+                                PaymentStatus.SUCCESS,
+                            razorpayPaymentId,
+                            $and: [
+                                {
+                                    "refunds.requestId":
+                                    {
+                                        $ne: requestId,
+                                    },
+                                },
+                                {
+                                    $or: [
+                                        {
+                                            [refundRequestIdPath]:
+                                            {
+                                                $exists:
+                                                    false,
+                                            },
+                                        },
+                                        {
+                                            [refundRequestIdPath]:
+                                                null,
+                                        },
+                                        {
+                                            [refundRequestIdPath]:
+                                                "",
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            $inc: {
+                                pendingRefundAmount:
+                                    refundAmount,
+                            },
+                            $set: {
+                                refundStatus:
+                                    RefundStatus.PENDING,
+                                [refundRequestIdPath]:
+                                    requestId,
+                                [refundStatusPath]:
+                                    RefundStatus.PENDING,
+                                [refundAmountPath]:
+                                    refundAmount,
+                            },
+                            $push: {
+                                refunds: {
+                                    requestId,
+                                    itemIndex,
+                                    amount:
+                                        refundAmount,
+                                    status:
+                                        RefundStatus.PENDING,
+                                    razorpayRefundId:
+                                        "",
+                                    razorpayPaymentId,
+                                    requestedAt:
+                                        new Date(),
+                                },
+                            },
+                        },
+                        {
+                            new: true,
+                        },
+                    );
+                if (!reservedOrder) {
+                    continue;
+                }
+                refundRequests.push({
+                    requestId,
+                    amount: refundAmount,
+                    itemIndex,
+                });
+                remainingRefundableAmount =
+                    Math.max(
+                        0,
+                        roundMoney(
+                            remainingRefundableAmount -
+                            refundAmount,
+                        ),
+                    );
+            }
+        }
+        // =====================================
+        // SEND RESERVED REFUNDS TO RAZORPAY
+        // =====================================
+        for (
+            const refundRequest
+            of refundRequests
+        ) {
+            try {
+                const refund =
+                    await PaymentService
+                        .refundPayment(
+                            refundRequest.requestId,
+                            razorpayPaymentId,
+                            refundRequest.amount,
+                        );
+                await processRefundResponse(
+                    orderId,
+                    refundRequest.itemIndex,
+                    refundRequest.requestId,
+                    refund,
+                );
+                console.log(
+                    "✅ POST-PAYMENT CANCELLATION REFUND CREATED:",
+                    {
+                        orderId,
+                        requestId:
+                            refundRequest
+                                .requestId,
+                        itemIndex:
+                            refundRequest
+                                .itemIndex,
+                        amount:
+                            refundRequest.amount,
+                    },
+                );
+            } catch (refundError: any) {
+                console.error(
+                    "POST-PAYMENT CANCELLATION REFUND ERROR:",
+                    refundError,
+                );
+                await markRefundFailed(
+                    orderId,
+                    refundRequest.itemIndex,
+                    refundRequest.requestId,
+                    refundError,
+                );
+            }
+        }
+        return await Order.findById(
+            orderId,
+        );
+    }
     static async cancelOrderItem(
         userId: string,
         orderId: string,

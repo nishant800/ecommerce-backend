@@ -201,16 +201,12 @@ export class PaymentService {
         // =====================================
         // UPDATE ORDER
         // =====================================
-
         order.paymentStatus =
             PaymentStatus.SUCCESS;
-
         order.razorpayPaymentId =
             razorpay_payment_id;
-
         order.razorpaySignature =
             razorpay_signature;
-
         await order.save();
         // =====================================
         // CLEAR CART
@@ -221,6 +217,41 @@ export class PaymentService {
                 items: [],
             }
         );
+        // =====================================
+        // RECONCILE CANCELLED PAID ORDER
+        // =====================================
+        //
+        // If the customer cancelled while the
+        // payment was still pending, payment has
+        // now become successful and the missing
+        // refund must be created.
+        //
+        // Dynamic import avoids a circular static
+        // dependency because OrderService already
+        // imports PaymentService.
+        // =====================================
+        try {
+            const {
+                OrderService,
+            } = await import(
+                "../orders/order.service.js"
+            );
+            await OrderService
+                .reconcileCancelledPaidOrder(
+                    order._id.toString(),
+                );
+        } catch (reconcileError) {
+            // Payment is already successfully saved.
+            // Do not turn a successful payment into
+            // a client-side verification failure.
+            //
+            // The payment webhook provides another
+            // reconciliation opportunity.
+            console.error(
+                "PAYMENT VERIFY CANCELLATION RECONCILIATION ERROR:",
+                reconcileError,
+            );
+        }
         console.log(
             "✅ PAYMENT VERIFIED:",
             {
