@@ -565,14 +565,27 @@ export class PaymentWebhookController {
 
                 if (event === "payment.captured") {
 
+                    // =====================================
+                    // TEMPORARY RACE-CONDITION TEST ONLY
+                    // REMOVE AFTER TEST
+                    // =====================================
+
+                    console.log(
+                        "🧪 TEST: payment.captured received — delaying processing for 30 seconds",
+                    );
+
+                    await new Promise<void>((resolve) => {
+                        setTimeout(resolve, 30000);
+                    });
+
+                    console.log(
+                        "🧪 TEST: payment.captured delay finished",
+                    );
+
                     const paymentStatus = String(
-
                         payment?.status || "",
-
                     )
-
                         .trim()
-
                         .toLowerCase();
 
                     if (paymentStatus !== "captured") {

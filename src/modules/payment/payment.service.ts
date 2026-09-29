@@ -201,13 +201,36 @@ export class PaymentService {
         // =====================================
         // UPDATE ORDER
         // =====================================
+
         order.paymentStatus =
             PaymentStatus.SUCCESS;
+
         order.razorpayPaymentId =
             razorpay_payment_id;
+
         order.razorpaySignature =
             razorpay_signature;
-        await order.save();
+
+        // =====================================
+        // TEMPORARY RACE-CONDITION TEST ONLY
+        // REMOVE AFTER TEST
+        // =====================================
+        //
+        // Do NOT persist payment success here.
+        // The returned in-memory order still shows SUCCESS
+        // to the app, but MongoDB remains PENDING until
+        // the delayed payment.captured webhook runs.
+        //
+        // This creates the exact test window where the
+        // customer can cancel before payment success is
+        // persisted in MongoDB.
+        // =====================================
+
+        console.log(
+            "🧪 TEST: /payment/verify success NOT saved to MongoDB",
+        );
+
+        // await order.save(); // TEMPORARILY DISABLED
         // =====================================
         // IMPORTANT STOCK RULE
         // =====================================
