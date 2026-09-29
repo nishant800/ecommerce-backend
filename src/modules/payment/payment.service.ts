@@ -211,40 +211,7 @@ export class PaymentService {
         order.razorpaySignature =
             razorpay_signature;
 
-        // =====================================
-        // TEMPORARY RACE-CONDITION TEST ONLY
-        // REMOVE AFTER TEST
-        // =====================================
-        //
-        // Do NOT persist payment success here.
-        // The returned in-memory order still shows SUCCESS
-        // to the app, but MongoDB remains PENDING until
-        // the delayed payment.captured webhook runs.
-        //
-        // This creates the exact test window where the
-        // customer can cancel before payment success is
-        // persisted in MongoDB.
-        // =====================================
-
-        console.log(
-            "🧪 TEST: /payment/verify success NOT saved to MongoDB",
-        );
-
-        // await order.save(); // TEMPORARILY DISABLED
-        // =====================================
-        // IMPORTANT STOCK RULE
-        // =====================================
-        //
-        // DO NOT reduce product stock here.
-        //
-        // The current checkout controller already
-        // reserves/deducts stock while creating the
-        // order. Reducing stock again during payment
-        // verification would double-deduct inventory.
-        //
-        // Cancellation will restore the exact cancelled
-        // quantity later.
-        // =====================================
+        await order.save();
         // =====================================
         // CLEAR CART
         // =====================================
