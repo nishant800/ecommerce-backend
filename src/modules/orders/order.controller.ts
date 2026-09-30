@@ -741,7 +741,11 @@ export const createOrder = async (
                 const seller = await User.findById(sellerId).select("business.state").session(session);
                 sellerStates.set(sellerId, seller?.business?.state);
             }
-            const gst = inclusiveGst(finalPrice * quantity, product.gstRate, sellerStates.get(sellerId), shippingAddress.state);
+            // The current marketplace is local to Akola, Maharashtra. Use that known
+            // state only when a state is missing; explicit interstate data retains IGST.
+            const supplyState = sellerStates.get(sellerId)?.trim() || "Maharashtra";
+            const destinationState = String(shippingAddress.state || "").trim() || "Maharashtra";
+            const gst = inclusiveGst(finalPrice * quantity, product.gstRate, supplyState, destinationState);
             orderItems.push({
                 hsnCode: product.hsnCode || "",
                 ...gst,

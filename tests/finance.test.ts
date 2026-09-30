@@ -105,7 +105,16 @@ test("checkout snapshots configured GST, ignores client totals, preserves delive
         assert.equal(order!.shippingCharge, delivery); assert.equal(order!.total, selling + delivery);
         assert.equal(order!.tax, order!.gstAmount); assert.equal(order!.gstAmount, inclusiveGst(selling, 18).gstAmount);
         assert.equal(order!.gstDetailsComplete, true);
+        assert.equal(paise(order!.cgstAmount!) + paise(order!.sgstAmount!), paise(order!.gstAmount!));
+        assert.equal(order!.igstAmount, 0);
     }
+    await User.collection.updateOne({ _id: gstSeller }, { $unset: { "business.state": 1 } });
+    const local = await checkout(118, 18);
+    assert.equal(local.order!.cgstAmount, 9); assert.equal(local.order!.sgstAmount, 9); assert.equal(local.order!.igstAmount, 0);
+    await User.collection.updateOne({ _id: gstSeller }, { $set: { "business.state": "Karnataka" } });
+    const interstate = await checkout(118, 18);
+    assert.equal(interstate.order!.cgstAmount, 0); assert.equal(interstate.order!.sgstAmount, 0); assert.equal(interstate.order!.igstAmount, 18);
+    await User.collection.updateOne({ _id: gstSeller }, { $set: { "business.state": "Maharashtra" } });
     const { order, product } = await checkout(100, 18, 2);
     assert.equal(order!.total, 230); assert.equal(order!.gstAmount, 30.51);
     assert.equal(order!.items[0].basePrice, 200); assert.equal(order!.items[0].discountPrice, 100);
