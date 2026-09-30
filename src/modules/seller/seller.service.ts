@@ -63,6 +63,7 @@ const sellerVisibleOrderFilter = () => ({
 const sellerOrderView = (order: any, seller: string) => {
     if (!order) return null;
     const value = typeof order.toJSON === "function" ? order.toJSON() : order;
+    const onlyThisSeller = value.items.every((item: any) => String(item.seller?._id || item.seller) === seller);
     value.items = value.items.map((item: any, index: number) => ({ ...item, orderItemIndex: index }))
         .filter((item: any) => String(item.seller?._id || item.seller) === seller);
     const active = value.items.filter((item: any) => item.quantity > (item.cancelledQuantity || 0));
@@ -73,7 +74,22 @@ const sellerOrderView = (order: any, seller: string) => {
     value.subtotal = value.items.reduce((total: number, item: any) => total + item.price * Math.max(0, item.quantity - (item.cancelledQuantity || 0)), 0);
     value.total = value.subtotal;
     value.shippingCharge = 0;
-    value.tax = 0;
+    if (value.gstAmount != null) {
+        // The seller view contains remaining merchandise; keep the immutable item GST snapshots intact.
+        const sumGst = (key: string) => value.items.reduce((sum: number, item: any) => sum + Math.round(Number(item[key] || 0) * 100 * Math.max(0, item.quantity - (item.cancelledQuantity || 0)) / item.quantity), 0) / 100;
+        value.gstAmount = sumGst("gstAmount");
+        value.tax = value.gstAmount;
+        value.gstDetailsComplete = value.items.every((item: any) => item.gstRate != null);
+        if (value.items.every((item: any) => item.cgstAmount != null && item.sgstAmount != null && item.igstAmount != null)) {
+            value.cgstAmount = sumGst("cgstAmount");
+            value.igstAmount = sumGst("igstAmount");
+            value.sgstAmount = Math.round((value.gstAmount - value.cgstAmount - value.igstAmount) * 100) / 100;
+        } else { delete value.cgstAmount; delete value.sgstAmount; delete value.igstAmount; }
+    } else if (!onlyThisSeller) {
+        // Legacy mixed-seller orders cannot reliably allocate their order-level tax.
+        value.gstDetailsComplete = false;
+        value.tax = 0;
+    }
     value.discount = value.items.reduce((total: number, item: any) => total + Math.max(0, (item.basePrice || item.price) - item.price) * Math.max(0, item.quantity - (item.cancelledQuantity || 0)), 0);
     delete value.refunds;
     delete value.refundedAmount;

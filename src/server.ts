@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { OrderService } from "./modules/orders/order.service.js";
-import { startSettlementScheduler } from "./modules/payout/payout.scheduler.js";
+import { initializeFinanceIndexes, startSettlementScheduler } from "./modules/payout/payout.scheduler.js";
 import app from "./app.js";
 import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
@@ -10,6 +10,7 @@ import {
 } from "./scripts/seedPolicies.js";
 const start = async () => {
     await connectDatabase();
+    await initializeFinanceIndexes();
     await seedDefaultCatalog();
     await seedPolicies();
     const PORT = Number(env.PORT);

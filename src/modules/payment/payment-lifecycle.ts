@@ -43,7 +43,10 @@ export async function confirmCapturedPayment(orderId: string, paymentId: string,
     const { OrderService } = await import("../orders/order.service.js");
     await OrderService.reconcileCancelledPaidOrder(orderId);
     await releaseSellerNotifications(orderId);
-    await EarningService.reconcileOrder(orderId);
+    // A finance configuration outage must not report an already captured payment as failed.
+    // The settlement scheduler retries this durable, idempotent ledger operation.
+    try { await EarningService.reconcileOrder(orderId); }
+    catch { console.error("Payment confirmed; earning reconciliation deferred", orderId); }
     await NotificationService.create({ userId: previous.user, recipientRole: NotificationRecipientRole.CUSTOMER,
         type: NotificationType.GENERAL, title: "Payment Successful", message: "Your payment was confirmed. Check your order for its latest status.",
         orderId: previous._id, dedupeKey: `payment-success:${orderId}` });

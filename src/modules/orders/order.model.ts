@@ -34,6 +34,12 @@ export enum RefundStatus {
 // ORDER ITEM
 // =========================================
 export interface IOrderItem {
+    hsnCode?: string;
+    gstRate?: number | null;
+    gstAmount?: number | null;
+    cgstAmount?: number;
+    sgstAmount?: number;
+    igstAmount?: number;
     product: mongoose.Types.ObjectId;
     // Seller who owns this product
     seller: mongoose.Types.ObjectId;
@@ -122,6 +128,11 @@ export interface IOrder extends Document {
     shippingCharge: number;
     discount: number;
     tax: number;
+    gstAmount?: number;
+    gstDetailsComplete?: boolean;
+    cgstAmount?: number;
+    sgstAmount?: number;
+    igstAmount?: number;
     total: number;
     paymentMethod: string;
     paymentStatus: PaymentStatus;
@@ -203,6 +214,12 @@ export interface IRefundRecord {
 // =========================================
 const OrderItemSchema = new Schema<IOrderItem>(
     {
+        hsnCode: { type: String, default: "" },
+        gstRate: { type: Number, default: null, min: 0, max: 100 },
+        gstAmount: { type: Number, default: null, min: 0 },
+        cgstAmount: { type: Number, min: 0 },
+        sgstAmount: { type: Number, min: 0 },
+        igstAmount: { type: Number, min: 0 },
         product: {
             type: Schema.Types.ObjectId,
             ref: "Product",
@@ -475,6 +492,11 @@ const ShippingAddressSchema =
 // =========================================
 const OrderSchema = new Schema<IOrder>(
     {
+        gstAmount: { type: Number, min: 0 },
+        gstDetailsComplete: { type: Boolean },
+        cgstAmount: { type: Number, min: 0 },
+        sgstAmount: { type: Number, min: 0 },
+        igstAmount: { type: Number, min: 0 },
         // =====================================
         // CUSTOMER
         // =====================================

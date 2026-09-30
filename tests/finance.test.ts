@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import crypto from "node:crypto";
 import mongoose from "mongoose";
-import { commission, allocate, paise } from "../src/modules/payout/payout.money.js";
+import { commission, allocate, paise, inclusiveGst } from "../src/modules/payout/payout.money.js";
 import { bankInput, encryptBankValue, decryptBankValue, verifyWebhookSignature } from "../src/modules/payout/payout.security.js";
 
 process.env.NODE_ENV = "test";
@@ -68,6 +68,66 @@ test("integer money, commission and allocations conserve paise", () => {
     assert.equal(paise(270.01), 27001); assert.equal(commission(27001, 1000), 2700);
     for (let amount = 0; amount < 100; amount++) assert.equal(allocate(amount, [13, 27, 60]).reduce((a, b) => a + b, 0), amount);
     assert.throws(() => paise(-1)); assert.throws(() => commission(100, 10001));
+});
+
+test("inclusive GST rounds line amounts without guessing rates or unknown state splits", () => {
+    assert.equal(inclusiveGst(800, 18).gstAmount, 122.03);
+    const intra = inclusiveGst(800, 18, "Maharashtra", " Maharashtra ");
+    assert.equal(paise(intra.cgstAmount!) + paise(intra.sgstAmount!), paise(intra.gstAmount!));
+    assert.equal(intra.igstAmount, 0);
+    const inter = inclusiveGst(800, 18, "Karnataka", "Maharashtra");
+    assert.equal(inter.igstAmount, inter.gstAmount);
+    assert.equal(inter.cgstAmount, 0); assert.equal(inter.sgstAmount, 0);
+    assert.deepEqual(inclusiveGst(800, undefined), { gstRate: null, gstAmount: null });
+    assert.deepEqual(inclusiveGst(800, 0), { gstRate: 0, gstAmount: 0 });
+    assert.equal(inclusiveGst(100, 0.25).gstAmount, 0.25);
+    assert.equal(inclusiveGst(800, 18, "MH", "Maharashtra").cgstAmount, undefined);
+    assert.throws(() => inclusiveGst(800, -1)); assert.throws(() => inclusiveGst(800, 18.123));
+});
+
+test("checkout snapshots configured GST, ignores client totals, preserves delivery and paid-value refunds", async () => {
+    const { createOrder } = await import("../src/modules/orders/order.controller.js");
+    const { default: User } = await import("../src/modules/users/user.model.js");
+    const gstSeller = new mongoose.Types.ObjectId();
+    await User.collection.insertOne({ _id: gstSeller, email: `gst-${gstSeller}@fixture.test`, phone: "9000000099", business: { state: "Maharashtra" } });
+    const checkout = async (selling: number, rate: number | null, quantity = 1) => {
+        const { product, order: template } = await fixture();
+        await Product.updateOne({ _id: product._id }, { $set: { seller: gstSeller, price: selling + 100, discountPrice: selling, hsnCode: "6109", gstRate: rate } }, { runValidators: true });
+        let status = 200; let response: any;
+        const res = { status(code: number) { status = code; return this; }, json(body: unknown) { response = body; return this; } };
+        await createOrder({ user: { userId: String(buyer) }, body: { items: [{ product: String(product._id), quantity, price: 1, gstRate: 99 }], shippingAddress: template.shippingAddress, paymentMethod: "ONLINE", total: 1, tax: 999, shippingCharge: 999 } } as any, res as any);
+        assert.equal(status, 201, response?.message);
+        return { order: await Order.findById(response.data._id), product };
+    };
+    for (const [selling, delivery] of [[499.99, 30], [500, 0], [800, 0]]) {
+        const { order } = await checkout(selling, 18);
+        assert.equal(order!.subtotal, selling); assert.equal(order!.discount, 100);
+        assert.equal(order!.shippingCharge, delivery); assert.equal(order!.total, selling + delivery);
+        assert.equal(order!.tax, order!.gstAmount); assert.equal(order!.gstAmount, inclusiveGst(selling, 18).gstAmount);
+        assert.equal(order!.gstDetailsComplete, true);
+    }
+    const { order, product } = await checkout(100, 18, 2);
+    assert.equal(order!.total, 230); assert.equal(order!.gstAmount, 30.51);
+    assert.equal(order!.items[0].basePrice, 200); assert.equal(order!.items[0].discountPrice, 100);
+    assert.equal(order!.items[0].price, 100); assert.equal(order!.items[0].hsnCode, "6109");
+    await Product.updateOne({ _id: product._id }, { $set: { gstRate: 5, hsnCode: "6110" } });
+    assert.equal((await Order.findById(order!._id))!.items[0].gstRate, 18);
+    await confirmCapturedPayment(String(order!._id), "pay_gst_snapshot");
+    const earning = await Earning.findOne({ order: order!._id, kind: "SALE" });
+    assert.equal(earning!.grossAmount, 20000); assert.equal(earning!.gstAmount, 3051); assert.equal(earning!.netAmount, 18000);
+    await OrderService.cancelOrderItem(String(buyer), String(order!._id), 0);
+    const cancelled = await Order.findById(order!._id);
+    assert.equal(cancelled!.refundedAmount, 230); // Existing full-order refund includes delivery; GST is never added again.
+    const reversed = await Earning.findById(earning!._id);
+    assert.equal(reversed!.refundAmount, 20000); assert.equal(reversed!.netAmount, 0); // Seller only funded merchandise.
+    assert.equal(cancelled!.items[0].gstAmount, 30.51);
+    const missing = await checkout(100, null);
+    assert.equal(missing.order!.items[0].gstRate, null); assert.equal(missing.order!.gstDetailsComplete, false);
+    const legacy = await fixture({ tax: 7.5 });
+    const legacyJson = legacy.order.toJSON();
+    assert.equal(legacyJson.gstAmount ?? legacyJson.tax, 7.5);
+    await assert.rejects(Product.updateOne({ _id: product._id }, { $set: { gstRate: 101 } }, { runValidators: true }));
+    await assert.rejects(Product.updateOne({ _id: product._id }, { $set: { hsnCode: "BAD" } }, { runValidators: true }));
 });
 test("bank encryption authenticates ciphertext and validates matching account details", () => {
     const value = encryptBankValue(bank.accountNumber);
@@ -139,10 +199,12 @@ test("payout reservation, duplicate provider events, post-payout refund debt, fa
     const response = { id: "pout_fixture", amount: payout.amount, currency: "INR", status: "processed", fund_account_id: "fa_fixture", reference_id: payout.providerReferenceId };
     await Promise.all([PayoutService.applyProviderStatus(payout.providerReferenceId, response, "test", "event-1"), PayoutService.applyProviderStatus(payout.providerReferenceId, response, "test", "event-1")]);
     assert.equal((await Earning.findOne({ order: order._id, kind: "SALE" }))!.status, "PAID");
+    const beforeRefundSummary = await EarningService.summary(String(seller));
     await Order.updateOne({ _id: order._id }, { $set: { "items.0.cancelledQuantity": 1 } });
     await EarningService.reconcileOrder(String(order._id)); await EarningService.reconcileOrder(String(order._id));
     assert.equal(await Earning.countDocuments({ order: order._id, kind: "ADJUSTMENT" }), 1);
     assert.equal((await Earning.findOne({ order: order._id, kind: "ADJUSTMENT" }))!.netAmount, -9000);
+    assert.equal((await EarningService.summary(String(seller))).refunded - beforeRefundSummary.refunded, 10000);
     assert.equal((await Payout.findById(payout._id))!.amount, 18000);
     await PayoutAccountService.save(String(seller), { ...bank, accountNumber: "123456789999", confirmAccountNumber: "123456789999" });
     assert.equal((await Payout.findById(payout._id))!.accountSnapshot!.accountNumberLast4, "9012");
@@ -152,6 +214,56 @@ test("payout reservation, duplicate provider events, post-payout refund debt, fa
     const rows = await Earning.find({ order: order._id, status: "AVAILABLE" });
     assert.equal(rows.reduce((sum, row) => sum + row.netAmount, 0), 9000);
     process.env.ENABLE_AUTOMATIC_SELLER_PAYOUTS = "false";
+});
+
+test("held unsent payouts release safely and ambiguous submissions reuse the exact transfer request", async () => {
+    const otherSeller = new mongoose.Types.ObjectId();
+    const { order } = await fixture({ orderStatus: "delivered", deliveredAt: new Date(Date.now() - 1000) });
+    await Order.updateOne({ _id: order._id }, { $set: { "items.0.seller": otherSeller } });
+    await confirmCapturedPayment(String(order._id), "pay_ambiguous");
+    await PayoutAccountService.save(String(otherSeller), bank);
+    await Account.updateOne({ seller: otherSeller }, { $set: { verificationStatus: "VERIFIED", providerFundAccountId: "fa_ambiguous" } });
+    const originalCreate = payoutProvider.createPayout;
+    const originalConfigured = payoutProvider.configured;
+    const requests: unknown[] = [];
+    payoutProvider.configured = () => true;
+    process.env.ENABLE_AUTOMATIC_SELLER_PAYOUTS = "true";
+    process.env.RAZORPAYX_ACCOUNT_NUMBER = "fixture-source";
+    payoutProvider.createPayout = async input => {
+        requests.push(input);
+        if (requests.length === 1) throw new Error("Fixture timeout after provider accepted transfer");
+        return { id: "pout_ambiguous", amount: input.amount, currency: "INR", status: "processed", fund_account_id: input.fundAccountId, reference_id: input.reference };
+    };
+    try {
+        const heldId = (await PayoutService.reserve(String(otherSeller)))!;
+        await Account.updateOne({ seller: otherSeller }, { $set: { payoutHeld: true } });
+        await PayoutService.submit(heldId);
+        assert.equal(requests.length, 0); assert.equal((await Payout.findById(heldId))!.status, "FAILED");
+        await Account.updateOne({ seller: otherSeller }, { $set: { payoutHeld: false } });
+        const payoutId = (await PayoutService.reserve(String(otherSeller)))!;
+        await assert.rejects(PayoutService.submit(payoutId), /timeout/);
+        assert.equal((await Earning.findOne({ order: order._id }))!.status, "PAYOUT_PENDING");
+        assert.equal(await PayoutService.reserve(String(otherSeller)), undefined);
+        await PayoutService.submit(payoutId);
+        assert.deepEqual(requests[0], requests[1]);
+        assert.equal((await Payout.findById(payoutId))!.status, "PROCESSED");
+        assert.equal((await Earning.findOne({ order: order._id }))!.status, "PAID");
+    } finally { payoutProvider.createPayout = originalCreate; payoutProvider.configured = originalConfigured; process.env.ENABLE_AUTOMATIC_SELLER_PAYOUTS = "false"; }
+});
+
+test("legacy refund events with different IDs cannot double-count or downgrade a processed refund", async () => {
+    const { PaymentWebhookController } = await import("../src/modules/payment/payment.webhook.controller.js");
+    process.env.RAZORPAY_WEBHOOK_SECRET = "fixture-webhook-only";
+    const { order } = await fixture({ paymentStatus: "success", razorpayPaymentId: "pay_legacy_refund", refundId: "rfnd_legacy", refundStatus: "pending" });
+    for (const [index, status] of ["processed", "processed", "failed"].entries()) {
+        const body = Buffer.from(JSON.stringify({ event: `refund.${status}`, payload: { refund: { entity: { id: "rfnd_legacy", payment_id: "pay_legacy_refund", amount: 10000, status } } } }));
+        let code = 200;
+        const response = { status(value: number) { code = value; return this; }, json() { return this; } };
+        await PaymentWebhookController.handle({ body, headers: { "x-razorpay-signature": crypto.createHmac("sha256", process.env.RAZORPAY_WEBHOOK_SECRET).update(body).digest("hex"), "x-razorpay-event-id": `legacy-${index}` } } as any, response as any);
+        assert.equal(code, 200);
+    }
+    const latest = await Order.findById(order._id);
+    assert.equal(latest!.refundedAmount, 100); assert.equal(latest!.refundStatus, "processed");
 });
 
 test("partial cancellation expiry restores only remaining variant quantities", async () => {

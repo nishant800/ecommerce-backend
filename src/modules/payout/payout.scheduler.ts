@@ -1,5 +1,8 @@
 import Order from "../orders/order.model.js";
 import Account from "../seller/sellerPayoutAccount.model.js";
+import Earning, { SellerEarningEvent, SellerFinanceLock } from "../seller/sellerEarning.model.js";
+import Payout from "./payout.model.js";
+import Notification from "../../notifications/notification.model.js";
 import { EarningService } from "./earning.service.js";
 import { PayoutService } from "./payout.service.js";
 import { PayoutAccountService } from "./payout-account.service.js";
@@ -10,6 +13,13 @@ let timer: ReturnType<typeof setInterval> | undefined;
 let busy = false;
 let cursor: string | undefined;
 let nextPayoutRun = Date.now() + 86_400_000;
+export async function initializeFinanceIndexes() {
+    // Additive only. Never sync/drop existing production indexes or backfill historical orders.
+    await Promise.all([Account.createIndexes(), Earning.createIndexes(), SellerEarningEvent.createIndexes(),
+        SellerFinanceLock.createIndexes(), Payout.createIndexes(),
+        Notification.collection.createIndex({ dedupeKey: 1 }, { unique: true, partialFilterExpression: { dedupeKey: { $type: "string" } } }),
+        Order.collection.createIndex({ paymentRetryEnabled: 1, paymentStatus: 1, orderStatus: 1, paymentRetryExpiresAt: 1, createdAt: 1 })]);
+}
 export function startSettlementScheduler() {
     if (timer) return;
     if (!process.env.MARKETPLACE_COMMISSION_PERCENT) console.warn("MARKETPLACE_COMMISSION_PERCENT missing: development uses zero; production settlements are blocked");

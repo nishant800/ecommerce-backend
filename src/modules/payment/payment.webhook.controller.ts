@@ -952,9 +952,9 @@ export class PaymentWebhookController {
 
                 ) {
 
-                    order.refundStatus =
-
-                        finalStatus;
+                    const legacyPreviousStatus = order.refundStatus;
+                    order.refundStatus = legacyPreviousStatus === RefundStatus.PROCESSED
+                        ? RefundStatus.PROCESSED : finalStatus;
 
                     order.refundId =
 
@@ -964,7 +964,7 @@ export class PaymentWebhookController {
 
                         finalStatus ===
 
-                        RefundStatus.PROCESSED
+                        RefundStatus.PROCESSED && legacyPreviousStatus !== RefundStatus.PROCESSED
 
                     ) {
 

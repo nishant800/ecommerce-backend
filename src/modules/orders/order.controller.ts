@@ -4,6 +4,8 @@ import Order from "./order.model.js";
 import { AuthRequest } from "../../middleware/auth.middleware.js";
 import { OrderService } from "./order.service.js";
 import Product from "../products/product.model.js";
+import User from "../users/user.model.js";
+import { inclusiveGst, paise } from "../payout/payout.money.js";
 import mongoose from "mongoose";
 import {
     NotificationService,
@@ -244,6 +246,7 @@ export const createOrder = async (
         // BUILD ORDER ITEMS
         // =========================================
         const orderItems: any[] = [];
+        const sellerStates = new Map<string, string | undefined>();
         let basePriceTotal = 0;
         let subtotalCalculated = 0;
         // =========================================
@@ -733,7 +736,15 @@ export const createOrder = async (
                         "";
                 }
             }
+            const sellerId = String(product.seller);
+            if (!sellerStates.has(sellerId)) {
+                const seller = await User.findById(sellerId).select("business.state").session(session);
+                sellerStates.set(sellerId, seller?.business?.state);
+            }
+            const gst = inclusiveGst(finalPrice * quantity, product.gstRate, sellerStates.get(sellerId), shippingAddress.state);
             orderItems.push({
+                hsnCode: product.hsnCode || "",
+                ...gst,
                 fulfilmentStatus: "pending",
                 product:
                     product._id,
@@ -779,9 +790,13 @@ export const createOrder = async (
             calculatedsubtotal < 500
                 ? 30
                 : 0;
-        // Tax is currently disabled in the
-        // existing checkout flow.
-        const calculatedTax = 0;
+        // Included GST disclosure; total and delivery calculation below are unchanged.
+        const calculatedTax = orderItems.reduce((sum, item) => sum + paise(item.gstAmount || 0), 0) / 100;
+        const gstDetailsComplete = orderItems.every(item => item.gstRate != null);
+        const gstSplits = orderItems.every(item => item.cgstAmount != null && item.sgstAmount != null && item.igstAmount != null)
+            ? { cgstAmount: orderItems.reduce((sum, item) => sum + paise(item.cgstAmount), 0) / 100,
+                sgstAmount: orderItems.reduce((sum, item) => sum + paise(item.sgstAmount), 0) / 100,
+                igstAmount: orderItems.reduce((sum, item) => sum + paise(item.igstAmount), 0) / 100 } : {};
         const calculatedTotal =
             calculatedsubtotal +
             calculatedShippingCharge;
@@ -805,6 +820,9 @@ export const createOrder = async (
                             calculatedDiscount,
                         tax:
                             calculatedTax,
+                        gstAmount: calculatedTax,
+                        gstDetailsComplete,
+                        ...gstSplits,
                         total:
                             calculatedTotal,
                         paymentMethod:

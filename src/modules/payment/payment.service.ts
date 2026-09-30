@@ -50,13 +50,14 @@ export class PaymentService {
         const { OrderService } = await import("../orders/order.service.js");
         await OrderService.expirePaymentOrder(orderId);
         const now = new Date();
+        const lockUntil = new Date(now.getTime() + 60_000);
         const order = await Order.findOneAndUpdate({ _id: orderId, user: userId,
             paymentMethod: onlineMethods, paymentRetryEnabled: true,
             paymentStatus: { $in: [PaymentStatus.PENDING, PaymentStatus.FAILED] },
             orderStatus: { $in: [OrderStatus.PENDING, OrderStatus.PARTIALLY_CANCELLED] },
             sellerReleasedAt: null,
             $or: [{ paymentCreationLockUntil: null }, { paymentCreationLockUntil: { $lte: now } }],
-        }, { $set: { paymentCreationLockUntil: new Date(now.getTime() + 60_000) } }, { new: true });
+        }, { $set: { paymentCreationLockUntil: lockUntil } }, { new: true });
         if (!order) throw new Error("Payment is already confirmed, unavailable, expired or being prepared. Refresh your order.");
         try {
             if (retryDeadline(order).getTime() <= Date.now()) throw new Error("Payment time expired");
@@ -71,13 +72,14 @@ export class PaymentService {
             if (retryDeadline(order).getTime() <= Date.now()) throw new Error("Payment time expired");
             if (!["created", "attempted"].includes(gateway.status)) throw new Error("Payment confirmation pending. Refresh your order.");
             const updated = await Order.findOneAndUpdate({ _id: order._id,
+                paymentCreationLockUntil: lockUntil,
                 paymentStatus: order.paymentStatus, paymentRetryEnabled: true, sellerReleasedAt: null,
                 orderStatus: { $in: [OrderStatus.PENDING, OrderStatus.PARTIALLY_CANCELLED] },
             }, { $set: { razorpayOrderId: gateway.id, paymentStatus: PaymentStatus.PENDING },
                 $inc: { paymentAttemptCount: isRetry ? 1 : 0, __v: 1 } }, { new: true });
             if (!updated) throw new Error("Order changed. Refresh before paying.");
             return { order: updated, razorpayOrder: gateway, keyId: process.env.RAZORPAY_KEY_ID, isRetry, serverTime: new Date().toISOString() };
-        } finally { await Order.updateOne({ _id: order._id }, { $set: { paymentCreationLockUntil: null } }); }
+        } finally { await Order.updateOne({ _id: order._id, paymentCreationLockUntil: lockUntil }, { $set: { paymentCreationLockUntil: null } }); }
     }
 
     static async verifyPayment(data: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }, userId: string) {

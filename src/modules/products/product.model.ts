@@ -64,6 +64,8 @@ export interface IVariant {
 // PRODUCT INTERFACE
 // =========================================
 export interface IProduct extends Document {
+    hsnCode?: string;
+    gstRate?: number | null;
     name: string;
     slug: string;
     shortDescription: string;
@@ -113,6 +115,9 @@ export interface IProduct extends Document {
 const ProductSchema =
     new Schema<IProduct>(
         {
+            hsnCode: { type: String, trim: true, default: '', match: /^(?:\d{4}|\d{6}|\d{8})?$/ },
+            gstRate: { type: Number, default: null, min: 0, max: 100,
+                validate: (value: number | null) => value == null || (Number.isFinite(value) && Math.abs(value * 100 - Math.round(value * 100)) < 0.000001) },
             name: {
                 type: String,
                 required: true,

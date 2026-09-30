@@ -56,6 +56,7 @@ export class EarningService {
                     seller, order: order._id, orderItemIndex: index, product: item.product,
                     productName: item.name, variant: Object.values(item.variant || {}).filter(Boolean).join(" / "), quantity: item.quantity,
                     grossAmount: gross, discountAllocation: Math.max(0, paise(item.basePrice) * item.quantity - gross),
+                    hsnCode: item.hsnCode, gstRate: item.gstRate, gstAmount: item.gstAmount == null ? null : paise(item.gstAmount),
                     refundAmount: refund, platformCommission: commission(gross - refund, rate), taxWithheld: 0,
                     netAmount: targetNet, commissionBps: rate, kind: "SALE", accountedDeduction: deduction,
                     status: nextStatus, eligibleAt, paymentMethod: order.paymentMethod,
@@ -109,7 +110,11 @@ export class EarningService {
         ]);
         const sums = Object.fromEntries(rows.map(r => [r._id, r.amount]));
         const sales = await Earning.aggregate([{ $match: { seller: new mongoose.Types.ObjectId(seller), kind: "SALE" } },
-            { $group: { _id: null, grossSales: { $sum: "$grossAmount" }, refunded: { $sum: "$refundAmount" } } }]);
+            // Reserved/paid rows retain their monetary snapshot; the latest audit records current gross refunds.
+            { $lookup: { from: SellerEarningEvent.collection.name, localField: "_id", foreignField: "earning",
+                pipeline: [{ $sort: { revision: -1 } }, { $limit: 1 }], as: "latestEvent" } },
+            { $group: { _id: null, grossSales: { $sum: "$grossAmount" },
+                refunded: { $sum: { $ifNull: [{ $arrayElemAt: ["$latestEvent.refundAmount", 0] }, "$refundAmount"] } } } }]);
         const adjustments = await Earning.aggregate([{ $match: { seller: new mongoose.Types.ObjectId(seller), kind: "ADJUSTMENT" } },
             { $group: { _id: null, amount: { $sum: "$netAmount" } } }]);
         return { currency: "INR", unit: "paise", available: Math.max(0, sums.AVAILABLE || 0), balance: sums.AVAILABLE || 0,

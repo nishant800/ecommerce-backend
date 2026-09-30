@@ -8,6 +8,9 @@ const schema = new Schema({
     productName: String,
     variant: String,
     quantity: { type: Number, required: true },
+    hsnCode: String,
+    gstRate: { type: Number, default: null },
+    gstAmount: { type: Number, default: null }, // Included GST snapshot, in paise like all ledger amounts.
     grossAmount: money,
     discountAllocation: money,
     refundAmount: money,
