@@ -1,7 +1,7 @@
 import mongoose, { type ClientSession } from "mongoose";
 import Order from "../orders/order.model.js";
 import Earning, { SellerEarningEvent, SellerFinanceLock } from "../seller/sellerEarning.model.js";
-import { allocate, commission, financeConfig, paise } from "./payout.money.js";
+import { allocate, commission, financeConfig, isSingleSellerMode, paise } from "./payout.money.js";
 import { NotificationService } from "../../notifications/notification.service.js";
 import { NotificationType, NotificationRecipientRole } from "../../notifications/notification.model.js";
 
@@ -10,8 +10,8 @@ export class EarningService {
         await SellerFinanceLock.updateOne({ _id: seller }, { $inc: { revision: 1 } }, { upsert: true, session });
     }
     static async reconcileOrder(orderId: string) {
-        const snapshot = await Order.findById(orderId).select("items.seller settlementEnabled");
-        if (!snapshot?.settlementEnabled) return;
+        const snapshot = await Order.findById(orderId).select("items.seller settlementEnabled sellerPayoutDisabled");
+        if (!snapshot?.settlementEnabled || snapshot.sellerPayoutDisabled) return;
         for (const seller of [...new Set(snapshot.items.map(i => String(i.seller)))].sort()) {
             const session = await mongoose.startSession();
             try {
@@ -23,8 +23,10 @@ export class EarningService {
         }
     }
     static async reconcileForSeller(orderId: string, seller: string, session: ClientSession) {
+        // Preserve existing online orders/ledger while merchant settlements are handled by Razorpay.
+        if (isSingleSellerMode() && await Order.exists({ _id: orderId, paymentMethod: /^(online|razorpay)$/i }).session(session)) return;
         // A write creates a conflict with cancellation/refund/status updates. A stale read alone is insufficient.
-        const order = await Order.findOneAndUpdate({ _id: orderId, settlementEnabled: true },
+        const order = await Order.findOneAndUpdate({ _id: orderId, settlementEnabled: true, sellerPayoutDisabled: { $ne: true } },
             { $inc: { settlementRevision: 1, __v: 1 } }, { new: true, session });
         if (!order) return;
         const online = /^(online|razorpay)$/i.test(order.paymentMethod);
@@ -117,8 +119,9 @@ export class EarningService {
                 refunded: { $sum: { $ifNull: [{ $arrayElemAt: ["$latestEvent.refundAmount", 0] }, "$refundAmount"] } } } }]);
         const adjustments = await Earning.aggregate([{ $match: { seller: new mongoose.Types.ObjectId(seller), kind: "ADJUSTMENT" } },
             { $group: { _id: null, amount: { $sum: "$netAmount" } } }]);
-        return { currency: "INR", unit: "paise", available: Math.max(0, sums.AVAILABLE || 0), balance: sums.AVAILABLE || 0,
-            pendingSettlement: sums.PENDING || 0, payoutPending: sums.PAYOUT_PENDING || 0, paidOut: sums.PAID || 0,
+        const singleSeller = isSingleSellerMode();
+        return { currency: "INR", unit: "paise", available: singleSeller ? 0 : Math.max(0, sums.AVAILABLE || 0), balance: singleSeller ? 0 : sums.AVAILABLE || 0,
+            pendingSettlement: singleSeller ? 0 : sums.PENDING || 0, payoutPending: sums.PAYOUT_PENDING || 0, paidOut: sums.PAID || 0,
             manualCod: sums.MANUAL || 0, adjustments: adjustments[0]?.amount || 0,
             grossSales: sales[0]?.grossSales || 0, refunded: sales[0]?.refunded || 0,
             netSales: (sales[0]?.grossSales || 0) - (sales[0]?.refunded || 0) };

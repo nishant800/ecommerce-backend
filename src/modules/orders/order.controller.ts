@@ -5,7 +5,7 @@ import { AuthRequest } from "../../middleware/auth.middleware.js";
 import { OrderService } from "./order.service.js";
 import Product from "../products/product.model.js";
 import User from "../users/user.model.js";
-import { inclusiveGst, paise } from "../payout/payout.money.js";
+import { inclusiveGst, isSingleSellerMode, paise } from "../payout/payout.money.js";
 import mongoose from "mongoose";
 import {
     NotificationService,
@@ -835,6 +835,8 @@ export const createOrder = async (
                         paymentStatus:
                             "pending",
                         paymentRetryEnabled: !isCodPayment,
+                        // Merchant-settled online sales must never become payable after switching modes.
+                        sellerPayoutDisabled: !isCodPayment && isSingleSellerMode(),
                         settlementEnabled: true,
                         // COD is immediately available
                         // for seller fulfilment.

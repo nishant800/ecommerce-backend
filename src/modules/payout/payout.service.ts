@@ -4,14 +4,14 @@ import Account from "../seller/sellerPayoutAccount.model.js";
 import Earning from "../seller/sellerEarning.model.js";
 import Payout from "./payout.model.js";
 import { EarningService } from "./earning.service.js";
-import { financeConfig } from "./payout.money.js";
+import { financeConfig, isSingleSellerMode } from "./payout.money.js";
 import { payoutProvider } from "./payout-account.service.js";
 import type { ProviderPayout } from "./payout.provider.js";
 import { NotificationService } from "../../notifications/notification.service.js";
 import { NotificationRecipientRole, NotificationType } from "../../notifications/notification.model.js";
 
 export function canExecutePayouts() {
-    return process.env.ENABLE_AUTOMATIC_SELLER_PAYOUTS === "true" && payoutProvider.configured();
+    return !isSingleSellerMode() && process.env.ENABLE_AUTOMATIC_SELLER_PAYOUTS === "true" && payoutProvider.configured();
 }
 export class PayoutService {
     static async reserve(seller: string) {

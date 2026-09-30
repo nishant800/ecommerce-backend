@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import crypto from "node:crypto";
 import mongoose from "mongoose";
-import { commission, allocate, paise, inclusiveGst } from "../src/modules/payout/payout.money.js";
+import { commission, allocate, paise, inclusiveGst, financeConfig } from "../src/modules/payout/payout.money.js";
 import { bankInput, encryptBankValue, decryptBankValue, verifyWebhookSignature } from "../src/modules/payout/payout.security.js";
 
 process.env.NODE_ENV = "test";
+process.env.SINGLE_SELLER_MODE = "false";
 process.env.JWT_SECRET = "fixture-jwt-secret-only";
 process.env.RAZORPAY_KEY_ID = "rzp_test_fixture";
 process.env.RAZORPAY_KEY_SECRET = "fixture-only";
@@ -138,6 +139,74 @@ test("checkout snapshots configured GST, ignores client totals, preserves delive
     await assert.rejects(Product.updateOne({ _id: product._id }, { $set: { gstRate: 101 } }, { runValidators: true }));
     await assert.rejects(Product.updateOne({ _id: product._id }, { $set: { hsnCode: "BAD" } }, { runValidators: true }));
 });
+test("single-seller mode blocks payouts, keeps owner sales non-payable across mode changes and preserves COD/history", async () => {
+    const { createOrder } = await import("../src/modules/orders/order.controller.js");
+    const { order: historical } = await fixture();
+    await confirmCapturedPayment(String(historical._id), "pay_single_history");
+    const historicalOrder = await Order.findById(historical._id).lean();
+    const historicalEarning = await Earning.findOne({ order: historical._id }).lean();
+    const originalConfigured = payoutProvider.configured;
+    const originalCreate = payoutProvider.createPayout;
+    let transferCalls = 0;
+    payoutProvider.configured = () => true;
+    payoutProvider.createPayout = async () => { transferCalls++; throw new Error("Unexpected owner transfer"); };
+    process.env.SINGLE_SELLER_MODE = "true";
+    process.env.ENABLE_AUTOMATIC_SELLER_PAYOUTS = "true"; // Single-seller mode must override this flag.
+    const checkout = async (paymentMethod: string) => {
+        const { product, order: template } = await fixture();
+        let status = 200; let response: any;
+        const res = { status(code: number) { status = code; return this; }, json(body: unknown) { response = body; return this; } };
+        await createOrder({ user: { userId: String(buyer) }, body: { items: [{ product: String(product._id), quantity: 2 }], shippingAddress: template.shippingAddress, paymentMethod } } as any, res as any);
+        assert.equal(status, 201, response?.message);
+        return (await Order.findById(response.data._id))!;
+    };
+    try {
+        assert.equal(financeConfig().bps, 0); // Even if MARKETPLACE_COMMISSION_PERCENT is still 10.
+        const payoutCount = await Payout.countDocuments();
+        await assert.rejects(PayoutService.reserve(String(seller)), /disabled/);
+        await assert.rejects(PayoutService.submit(String(new mongoose.Types.ObjectId())), /disabled/);
+        assert.deepEqual(await PayoutService.processEligibleSellerPayouts(), { enabled: false, processed: 0 });
+        assert.equal(await Payout.countDocuments(), payoutCount); assert.equal(transferCalls, 0);
+        await EarningService.reconcileOrder(String(historical._id));
+        assert.deepEqual(await Order.findById(historical._id).lean(), historicalOrder);
+        assert.deepEqual(await Earning.findOne({ order: historical._id }).lean(), historicalEarning);
+        const summary = await EarningService.summary(String(seller));
+        assert.equal(summary.available, 0); assert.equal(summary.balance, 0); assert.equal(summary.pendingSettlement, 0);
+
+        const online = await checkout("ONLINE");
+        assert.equal(online.settlementEnabled, true); assert.equal(online.sellerPayoutDisabled, true); assert.equal(online.total, 230);
+        assert.equal(online.paymentRetryEnabled, true); assert.equal(online.sellerReleasedAt, null);
+        await confirmCapturedPayment(String(online._id), "pay_single_owner");
+        assert.equal((await Order.findById(online._id))!.paymentStatus, "success");
+        assert.ok(await SellerService.getOrder(String(seller), String(online._id)));
+        assert.equal(await Earning.countDocuments({ order: online._id }), 0);
+        await OrderService.cancelOrderItem(String(buyer), String(online._id), 0);
+        assert.equal((await Order.findById(online._id))!.refundedAmount, 230);
+
+        const cod = await checkout("COD");
+        assert.equal(cod.settlementEnabled, true); assert.equal(cod.sellerPayoutDisabled, false); assert.ok(cod.sellerReleasedAt);
+        assert.equal(cod.paymentRetryEnabled, false);
+        await Order.updateOne({ _id: cod._id }, { $set: { orderStatus: "delivered", deliveredAt: new Date() } });
+        await EarningService.reconcileOrder(String(cod._id));
+        const codEarning = await Earning.findOne({ order: cod._id });
+        assert.equal(codEarning!.status, "MANUAL"); assert.equal(codEarning!.settlementMode, "COD_COLLECTED_BY_SELLER");
+        assert.equal(codEarning!.commissionBps, 0); assert.equal(codEarning!.netAmount, 20000);
+
+        process.env.SINGLE_SELLER_MODE = "false";
+        assert.equal(financeConfig().bps, 1000);
+        await EarningService.reconcileOrder(String(online._id));
+        assert.equal(await Earning.countDocuments({ order: online._id }), 0);
+        const marketplace = await checkout("ONLINE");
+        assert.equal(marketplace.settlementEnabled, true); assert.equal(marketplace.sellerPayoutDisabled, false);
+        await confirmCapturedPayment(String(marketplace._id), "pay_marketplace_resumed");
+        assert.equal((await Earning.findOne({ order: marketplace._id }))!.commissionBps, 1000);
+    } finally {
+        process.env.SINGLE_SELLER_MODE = "false";
+        process.env.ENABLE_AUTOMATIC_SELLER_PAYOUTS = "false";
+        payoutProvider.configured = originalConfigured; payoutProvider.createPayout = originalCreate;
+    }
+});
+
 test("bank encryption authenticates ciphertext and validates matching account details", () => {
     const value = encryptBankValue(bank.accountNumber);
     assert.equal(decryptBankValue(value), bank.accountNumber); assert.ok(!value.includes(bank.accountNumber));

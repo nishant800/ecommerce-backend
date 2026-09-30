@@ -37,8 +37,11 @@ export function allocate(amount: number, weights: number[]) {
     for (let i = 0; remainder > 0 && i < shares.length; i++) if (shares[i] < weights[i]) { shares[i]++; remainder--; }
     return shares;
 }
+export function isSingleSellerMode() {
+    return process.env.SINGLE_SELLER_MODE === "true";
+}
 export function financeConfig() {
-    const percent = process.env.MARKETPLACE_COMMISSION_PERCENT;
+    const percent = isSingleSellerMode() ? "0" : process.env.MARKETPLACE_COMMISSION_PERCENT;
     if (!percent && process.env.NODE_ENV === "production") throw new Error("Marketplace commission must be configured");
     const bps = Math.round(Number(percent || 0) * 100);
     const holdDays = Number(process.env.SELLER_SETTLEMENT_HOLD_DAYS || 7);

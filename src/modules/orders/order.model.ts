@@ -147,6 +147,7 @@ export interface IOrder extends Document {
     paymentCreationLockUntil?: Date;
     settlementRevision: number;
     settlementEnabled: boolean;
+    sellerPayoutDisabled?: boolean;
     // Number of Razorpay payment attempts created for
     // this ecommerce order.
     paymentAttemptCount: number;
@@ -579,6 +580,7 @@ const OrderSchema = new Schema<IOrder>(
         paymentCreationLockUntil: { type: Date, default: null, select: false },
         settlementRevision: { type: Number, default: 0, select: false },
         settlementEnabled: { type: Boolean, default: false },
+        sellerPayoutDisabled: { type: Boolean },
         paymentAttemptCount: {
             type: Number,
             default: 0,
