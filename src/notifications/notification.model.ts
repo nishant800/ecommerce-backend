@@ -46,6 +46,10 @@ export enum NotificationRecipientRole {
 // =========================================
 export interface INotification
     extends Document {
+    dedupeKey?: string;
+    pushSentAt?: Date;
+    pushClaimUntil?: Date;
+    pushData?: Record<string, string>;
     user:
     mongoose.Types.ObjectId;
     recipientRole:
@@ -73,6 +77,10 @@ export interface INotification
 const NotificationSchema =
     new Schema<INotification>(
         {
+            dedupeKey: { type: String },
+            pushSentAt: { type: Date, default: null },
+            pushClaimUntil: { type: Date, default: null },
+            pushData: { type: Map, of: String },
             user: {
                 type:
                     Schema.Types.ObjectId,
@@ -156,6 +164,7 @@ const NotificationSchema =
 // =========================================
 // MODEL
 // =========================================
+NotificationSchema.index({ dedupeKey: 1 }, { unique: true, partialFilterExpression: { dedupeKey: { $type: "string" } } });
 const Notification:
     Model<INotification> =
     mongoose.models.Notification ||

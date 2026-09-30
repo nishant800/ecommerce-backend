@@ -1,3 +1,4 @@
+import { releaseSellerNotifications } from "../payment/payment-lifecycle.js";
 import { Response } from "express";
 import Order from "./order.model.js";
 import { AuthRequest } from "../../middleware/auth.middleware.js";
@@ -151,6 +152,7 @@ export const createOrder = async (
             req.user?.userId;
         if (!userId) {
             return res.status(401).json({
+            serverTime: new Date().toISOString(),
                 success: false,
                 message: "Unauthorized",
             });
@@ -163,6 +165,16 @@ export const createOrder = async (
             shippingAddress,
             paymentMethod,
         } = req.body;
+        const normalizedPaymentMethod =
+            String(
+                paymentMethod || "COD"
+            )
+                .trim()
+                .toLowerCase();
+        if (!["cod", "online", "razorpay"].includes(normalizedPaymentMethod)) throw new Error("Invalid payment method");
+        const isCodPayment =
+            normalizedPaymentMethod ===
+            "cod";
         // =========================================
         // BASIC VALIDATION
         // =========================================
@@ -171,12 +183,14 @@ export const createOrder = async (
             items.length === 0
         ) {
             return res.status(400).json({
+            serverTime: new Date().toISOString(),
                 success: false,
                 message: "Cart is empty",
             });
         }
         if (!shippingAddress) {
             return res.status(400).json({
+            serverTime: new Date().toISOString(),
                 success: false,
                 message:
                     "Shipping address is required",
@@ -205,6 +219,7 @@ export const createOrder = async (
             )
         ) {
             return res.status(400).json({
+            serverTime: new Date().toISOString(),
                 success: false,
                 message:
                     "Delivery is currently available only in Akola (444001 and 444002). Please select an eligible delivery address to continue.",
@@ -719,6 +734,7 @@ export const createOrder = async (
                 }
             }
             orderItems.push({
+                fulfilmentStatus: "pending",
                 product:
                     product._id,
                 seller:
@@ -796,6 +812,19 @@ export const createOrder = async (
                             "COD",
                         paymentStatus:
                             "pending",
+                        paymentRetryEnabled: !isCodPayment,
+                        settlementEnabled: true,
+                        // COD is immediately available
+                        // for seller fulfilment.
+                        //
+                        // Online-payment orders stay
+                        // hidden from the seller until
+                        // payment is confirmed by the
+                        // payment service/webhook.
+                        sellerReleasedAt:
+                            isCodPayment
+                                ? new Date()
+                                : null,
                         orderStatus:
                             "pending",
                     },
@@ -834,41 +863,12 @@ export const createOrder = async (
                 orderId:
                     order._id,
             });
-            const sellerIds =
-                [
-                    ...new Set(
-                        orderItems
-                            .map(
-                                item =>
-                                    item.seller
-                                        ?.toString(),
-                            )
-                            .filter(
-                                Boolean,
-                            ),
-                    ),
-                ];
-            await Promise.all(
-                sellerIds.map(
-                    sellerId =>
-                        NotificationService.create({
-                            userId:
-                                sellerId,
-                            recipientRole:
-                                NotificationRecipientRole.SELLER,
-                            type:
-                                NotificationType.NEW_ORDER,
-                            title:
-                                "New Order Received",
-                            message:
-                                `You have received a new order #${order._id
-                                    .toString()
-                                    .slice(-8)}.`,
-                            orderId:
-                                order._id,
-                        })
-                ),
-            );
+            // Online orders must not be sent
+            // to sellers before payment is
+            // confirmed. COD is released here.
+            if (isCodPayment) {
+                await releaseSellerNotifications(String(order._id));
+            }
         } catch (
         notificationError
         ) {
@@ -901,6 +901,7 @@ export const createOrder = async (
         // RESPONSE
         // =========================================
         return res.status(201).json({
+            serverTime: new Date().toISOString(),
             success:
                 true,
             message:
@@ -958,6 +959,7 @@ export class OrderController {
                 req.user?.userId;
             if (!userId) {
                 return res.status(401).json({
+            serverTime: new Date().toISOString(),
                     success: false,
                     message:
                         "Unauthorized",
@@ -968,6 +970,7 @@ export class OrderController {
                     userId
                 );
             return res.json({
+            serverTime: new Date().toISOString(),
                 success:
                     true,
                 data:
@@ -979,6 +982,7 @@ export class OrderController {
                 error
             );
             return res.status(500).json({
+            serverTime: new Date().toISOString(),
                 success:
                     false,
                 message:
@@ -999,6 +1003,7 @@ export class OrderController {
                 req.user?.userId;
             if (!userId) {
                 return res.status(401).json({
+            serverTime: new Date().toISOString(),
                     success: false,
                     message:
                         "Unauthorized",
@@ -1013,6 +1018,7 @@ export class OrderController {
                 );
             if (!order) {
                 return res.status(404).json({
+            serverTime: new Date().toISOString(),
                     success:
                         false,
                     message:
@@ -1020,6 +1026,7 @@ export class OrderController {
                 });
             }
             return res.json({
+            serverTime: new Date().toISOString(),
                 success:
                     true,
                 data:
@@ -1031,6 +1038,7 @@ export class OrderController {
                 error
             );
             return res.status(500).json({
+            serverTime: new Date().toISOString(),
                 success:
                     false,
                 message:
@@ -1052,6 +1060,7 @@ export class OrderController {
                 req.user?.userId;
             if (!userId) {
                 return res.status(401).json({
+            serverTime: new Date().toISOString(),
                     success: false,
                     message: "Unauthorized",
                 });
@@ -1062,6 +1071,7 @@ export class OrderController {
                 Number(req.params.itemIndex);
             if (!orderId) {
                 return res.status(400).json({
+            serverTime: new Date().toISOString(),
                     success: false,
                     message: "Order ID is required",
                 });
@@ -1071,6 +1081,7 @@ export class OrderController {
                 itemIndex < 0
             ) {
                 return res.status(400).json({
+            serverTime: new Date().toISOString(),
                     success: false,
                     message: "Invalid order item index",
                 });
@@ -1083,11 +1094,13 @@ export class OrderController {
                 );
             if (!order) {
                 return res.status(404).json({
+            serverTime: new Date().toISOString(),
                     success: false,
                     message: "Order not found",
                 });
             }
             return res.json({
+            serverTime: new Date().toISOString(),
                 success: true,
                 message:
                     "Order item cancelled successfully",
@@ -1099,6 +1112,7 @@ export class OrderController {
                 error
             );
             return res.status(400).json({
+            serverTime: new Date().toISOString(),
                 success: false,
                 message:
                     error?.message ||
@@ -1118,6 +1132,7 @@ export class OrderController {
                 req.user?.userId;
             if (!userId) {
                 return res.status(401).json({
+            serverTime: new Date().toISOString(),
                     success:
                         false,
                     message:
@@ -1133,6 +1148,7 @@ export class OrderController {
                 );
             if (!order) {
                 return res.status(404).json({
+            serverTime: new Date().toISOString(),
                     success:
                         false,
                     message:
@@ -1140,6 +1156,7 @@ export class OrderController {
                 });
             }
             return res.json({
+            serverTime: new Date().toISOString(),
                 success:
                     true,
                 data:
@@ -1151,6 +1168,7 @@ export class OrderController {
                 error
             );
             return res.status(400).json({
+            serverTime: new Date().toISOString(),
                 success:
                     false,
                 message:

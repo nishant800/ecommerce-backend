@@ -28,6 +28,7 @@ export class PaymentController {
                 );
             return res.json({
                 success: true,
+                serverTime: new Date().toISOString(),
                 data: result,
             });
         } catch (error: any) {
@@ -63,6 +64,7 @@ export class PaymentController {
                 );
             return res.json({
                 success: true,
+                serverTime: new Date().toISOString(),
                 data: order,
             });
         } catch (error: any) {

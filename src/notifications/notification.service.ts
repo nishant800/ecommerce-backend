@@ -53,6 +53,32 @@ const getRecipientRole =
 // NOTIFICATION SERVICE
 // =========================================
 export class NotificationService {
+    static async enqueue(data: {
+        userId: string | mongoose.Types.ObjectId; type: NotificationType; title: string; message: string;
+        orderId?: string | mongoose.Types.ObjectId; recipientRole?: NotificationRecipientRole;
+        dedupeKey: string; data?: Record<string, string>;
+    }, session?: mongoose.ClientSession) {
+        return Notification.findOneAndUpdate({ dedupeKey: data.dedupeKey }, { $setOnInsert: {
+            user: data.userId, recipientRole: data.recipientRole || getRecipientRole(data.type),
+            type: data.type, title: data.title, message: data.message, order: data.orderId,
+            dedupeKey: data.dedupeKey, pushData: data.data, pushSentAt: null,
+        } }, { upsert: true, new: true, session });
+    }
+
+    static async dispatchPending() {
+        for (let i = 0; i < 100; i++) {
+            const now = new Date();
+            const notification = await Notification.findOneAndUpdate({
+                dedupeKey: { $exists: true }, pushSentAt: null,
+                $or: [{ pushClaimUntil: null }, { pushClaimUntil: { $lte: now } }],
+            }, { $set: { pushClaimUntil: new Date(now.getTime() + 60_000) } }, { new: true });
+            if (!notification) break;
+            await FirebaseMessagingService.sendToUser({ userId: String(notification.user), title: notification.title,
+                body: notification.message, data: { type: notification.type, notificationId: String(notification._id),
+                    orderId: notification.order ? String(notification.order) : "", ...(notification.toObject().pushData || {}) } });
+            await Notification.updateOne({ _id: notification._id }, { $set: { pushSentAt: new Date() } });
+        }
+    }
     // =========================================
     // CREATE NOTIFICATION
     // =========================================
@@ -76,8 +102,14 @@ export class NotificationService {
             recipientRole?:
             NotificationRecipientRole;
             data?: Record<string, string>;
+            dedupeKey?: string;
         },
     ) {
+        if (data.dedupeKey) {
+            const result = await this.enqueue({ ...data, dedupeKey: data.dedupeKey });
+            void this.dispatchPending().catch(() => console.error("Notification delivery deferred"));
+            return result;
+        }
         const recipientRole =
             data.recipientRole ||
             getRecipientRole(

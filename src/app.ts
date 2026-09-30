@@ -1,4 +1,6 @@
 import authRoutes from "./modules/auth/auth.routes.js";
+import { sellerFinanceRoutes, adminFinanceRoutes } from "./modules/payout/payout.routes.js";
+import { payoutWebhook } from "./modules/payout/payout.webhook.controller.js";
 import productRoutes from "./modules/products/index.js";
 import express from "express";
 import cors from "cors";
@@ -43,7 +45,10 @@ app.use(
 // =========================================
 // NORMAL BODY PARSERS
 // =========================================
+app.post("/api/payout/webhook", express.raw({ type: "application/json" }), payoutWebhook);
 app.use(express.json());
+app.use("/api/seller", sellerFinanceRoutes);
+app.use("/api/admin", adminFinanceRoutes);
 app.use(
     express.urlencoded({
         extended: true,

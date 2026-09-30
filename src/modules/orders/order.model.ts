@@ -59,6 +59,8 @@ export interface IOrderItem {
     // the order schema again.
     cancelledQuantity: number;
     cancelledAt?: Date;
+    fulfilmentStatus?: string;
+    deliveredAt?: Date;
     // Internal refund request reference. It is stable for
     // this cancellation attempt and is used as the Razorpay
     // receipt/idempotency reference by the payment layer.
@@ -123,6 +125,32 @@ export interface IOrder extends Document {
     total: number;
     paymentMethod: string;
     paymentStatus: PaymentStatus;
+    // =====================================
+    // ONLINE PAYMENT RETRY
+    // =====================================
+    // Backend-controlled deadline for retrying a failed
+    // online payment. The frontend countdown must be
+    // derived from this timestamp.
+    paymentRetryExpiresAt?: Date;
+    paymentRetryEnabled: boolean;
+    paymentCreationLockUntil?: Date;
+    settlementRevision: number;
+    settlementEnabled: boolean;
+    // Number of Razorpay payment attempts created for
+    // this ecommerce order.
+    paymentAttemptCount: number;
+    // =====================================
+    // SELLER RELEASE
+    // =====================================
+    // Online orders must remain hidden from sellers until
+    // payment is confirmed. This timestamp is set only
+    // when the order is released to the seller.
+    sellerReleasedAt?: Date;
+    // Timestamp used to guarantee that the seller
+    // NEW_ORDER notification is sent only once even
+    // if /verify and payment.captured both confirm
+    // the same online payment.
+    sellerNewOrderNotifiedAt?: Date;
     orderStatus: OrderStatus;
     // =====================================
     // SHIPPING LABEL
@@ -230,6 +258,8 @@ const OrderItemSchema = new Schema<IOrderItem>(
             type: Date,
             default: null,
         },
+        fulfilmentStatus: { type: String, enum: ["pending", "shipped", "delivered"], default: undefined },
+        deliveredAt: { type: Date, default: null },
         refundRequestId: {
             type: String,
             default: "",
@@ -516,6 +546,35 @@ const OrderSchema = new Schema<IOrder>(
             default: PaymentStatus.PENDING,
         },
         // =====================================
+        // ONLINE PAYMENT RETRY
+        // =====================================
+        paymentRetryExpiresAt: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+        paymentRetryEnabled: { type: Boolean, default: false },
+        paymentCreationLockUntil: { type: Date, default: null, select: false },
+        settlementRevision: { type: Number, default: 0, select: false },
+        settlementEnabled: { type: Boolean, default: false },
+        paymentAttemptCount: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
+        // =====================================
+        // SELLER RELEASE
+        // =====================================
+        sellerReleasedAt: {
+            type: Date,
+            default: null,
+        },
+        sellerNewOrderNotifiedAt: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+        // =====================================
         // ORDER STATUS
         // =====================================
         orderStatus: {
@@ -646,6 +705,17 @@ const OrderSchema = new Schema<IOrder>(
 // =========================================
 // MODEL
 // =========================================
+OrderSchema.index({ paymentRetryEnabled: 1, paymentStatus: 1, orderStatus: 1, paymentRetryExpiresAt: 1, createdAt: 1 });
+OrderSchema.set("optimisticConcurrency", true);
+OrderSchema.set("toJSON", { transform: (_doc, ret) => {
+    delete ret.sellerNewOrderNotifiedAt;
+    delete ret.razorpaySignature;
+    delete ret.paymentWebhookEventIds;
+    delete ret.refundWebhookEventIds;
+    delete ret.paymentCreationLockUntil;
+    Reflect.deleteProperty(ret, "settlementRevision");
+    return ret;
+} });
 const Order: Model<IOrder> =
     mongoose.models.Order ||
     mongoose.model<IOrder>(

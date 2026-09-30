@@ -1,4 +1,6 @@
+import { EarningService } from "../payout/earning.service.js";
 import mongoose from "mongoose";
+import { expiredPaymentFilter } from "./payment-retry.js";
 import Cart from "../cart/cart.model.js";
 import Product from "../products/product.model.js";
 import Address from "../address/address.model.js";
@@ -12,6 +14,7 @@ import {
 } from "../../notifications/notification.service.js";
 import {
     NotificationType,
+    NotificationRecipientRole,
 } from "../../notifications/notification.model.js";
 import {
     PaymentService,
@@ -211,7 +214,9 @@ const processRefundResponse = async (
     refundRequestId: string,
     refundResponse: any,
 ) => {
-    const order = await Order.findById(orderId);
+    const session = await mongoose.startSession();
+    try { await session.withTransaction(async () => {
+    const order = await Order.findById(orderId).session(session);
     if (!order) {
         return;
     }
@@ -243,6 +248,7 @@ const processRefundResponse = async (
                 : RefundStatus.PENDING;
     const previousStatus =
         refundRecord.status;
+    if (previousStatus === RefundStatus.PROCESSED) return;
     refundRecord.status = finalStatus;
     if (refundResponse?.id) {
         refundRecord.razorpayRefundId =
@@ -251,7 +257,7 @@ const processRefundResponse = async (
     if (finalStatus === RefundStatus.PROCESSED) {
         refundRecord.processedAt =
             refundRecord.processedAt || new Date();
-        if (previousStatus !== RefundStatus.PROCESSED) {
+        {
             order.pendingRefundAmount =
                 Math.max(
                     0,
@@ -310,7 +316,8 @@ const processRefundResponse = async (
         order.refundedAt =
             order.refundedAt || new Date();
     }
-    await order.save();
+    await order.save({ session });
+    }); } finally { await session.endSession(); }
 };
 const markRefundFailed = async (
     orderId: string,
@@ -318,7 +325,9 @@ const markRefundFailed = async (
     refundRequestId: string,
     error: any,
 ) => {
-    const order = await Order.findById(orderId);
+    const session = await mongoose.startSession();
+    try { await session.withTransaction(async () => {
+    const order = await Order.findById(orderId).session(session);
     if (!order) {
         return;
     }
@@ -327,7 +336,7 @@ const markRefundFailed = async (
             (refund: any) =>
                 refund.requestId === refundRequestId,
         );
-    if (!refundRecord) {
+    if (!refundRecord || refundRecord.status === RefundStatus.PROCESSED) {
         return;
     }
     const amount = roundMoney(
@@ -357,9 +366,77 @@ const markRefundFailed = async (
     }
     order.refundStatus =
         RefundStatus.FAILED;
-    await order.save();
+    await order.save({ session });
+    }); } finally { await session.endSession(); }
 };
 export class OrderService {
+    static async notifyCancellation(orderId: string) {
+        const order = await Order.findById(orderId);
+        if (!order) return;
+        if (order.refundStatus === RefundStatus.PENDING) {
+            await NotificationService.create({ userId: order.user, type: NotificationType.GENERAL,
+                recipientRole: NotificationRecipientRole.CUSTOMER, title: "Refund Processing",
+                message: "Your refund is being processed. See your order for item details.", orderId: order._id,
+                dedupeKey: `refund-processing:${orderId}:${order.refunds?.length || 0}` });
+        }
+        if (!order.sellerReleasedAt) return;
+        for (const seller of new Set(order.items.filter(i => i.cancelledQuantity > 0).map(i => String(i.seller)))) {
+            const cancelled = order.items.filter(i => String(i.seller) === seller).reduce((sum, i) => sum + i.cancelledQuantity, 0);
+            await NotificationService.create({ userId: seller, recipientRole: NotificationRecipientRole.SELLER,
+                type: NotificationType.ORDER_CANCELLED, title: "Order items cancelled", message: "Items in your order were cancelled. Check order details before fulfilment.",
+                orderId: order._id, dedupeKey: `seller-cancelled:${orderId}:${seller}:${cancelled}` });
+        }
+    }
+    private static expiryTimer: ReturnType<typeof setInterval> | undefined;
+    private static expiryRunning = false;
+
+    static async expirePaymentOrder(orderId: string, now = new Date()) {
+        const session = await mongoose.startSession();
+        try {
+            await session.withTransaction(async () => {
+                const order = await Order.findOne({ _id: orderId, ...expiredPaymentFilter(now) }).session(session);
+                if (!order) return;
+                for (const item of order.items) {
+                    const remaining = item.quantity - (item.cancelledQuantity || 0);
+                    if (remaining <= 0) continue;
+                    const product = await Product.findById(item.product).session(session);
+                    if (!product) throw new Error("Expiry cannot restore missing product");
+                    await restoreStockForItem(product, { variant: item.variant, quantity: remaining }, session);
+                    item.cancelledQuantity = item.quantity;
+                    item.cancelledAt = now;
+                }
+                order.orderStatus = OrderStatus.CANCELLED;
+                order.paymentStatus = PaymentStatus.FAILED;
+                order.paymentRetryEnabled = false;
+                order.set("paymentRetryExpiresAt", null);
+                await order.save({ session });
+                await NotificationService.enqueue({ userId: order.user, type: NotificationType.ORDER_CANCELLED,
+                    title: "Payment Time Expired", message: "Your payment time expired. Your order has been cancelled.",
+                    orderId: order._id, dedupeKey: `payment-expired:${order._id}` }, session);
+            });
+        } finally { await session.endSession(); }
+    }
+
+    static async sweepExpiredPayments() {
+        if (this.expiryRunning) return;
+        this.expiryRunning = true;
+        try {
+            const orders = await Order.find(expiredPaymentFilter()).select("_id").limit(200);
+            for (const order of orders) {
+                try { await this.expirePaymentOrder(String(order._id)); }
+                catch { console.error("Payment expiry failed; will retry", String(order._id)); }
+            }
+            await NotificationService.dispatchPending();
+        } finally { this.expiryRunning = false; }
+    }
+
+    static startPaymentRetryExpiryScheduler() {
+        if (this.expiryTimer) return;
+        const sweep = () => void this.sweepExpiredPayments().catch(() => console.error("Payment expiry sweep failed"));
+        this.expiryTimer = setInterval(sweep, 60_000);
+        this.expiryTimer.unref();
+        sweep();
+    }
     // =========================================
     // CREATE ORDER
     // =========================================
@@ -624,6 +701,7 @@ export class OrderService {
         userId: string,
         orderId: string
     ) {
+        if (!mongoose.isValidObjectId(orderId)) throw new Error("Invalid order ID");
         return await Order.findOne({
             _id: orderId,
             user: userId,
@@ -754,6 +832,7 @@ export class OrderService {
                         },
                         {
                             $inc: {
+                                __v: 1,
                                 pendingRefundAmount:
                                     remainingRefundableAmount,
                             },
@@ -922,6 +1001,7 @@ export class OrderService {
                         },
                         {
                             $inc: {
+                                __v: 1,
                                 pendingRefundAmount:
                                     refundAmount,
                             },
@@ -1174,6 +1254,10 @@ export class OrderService {
                     requestedAt: new Date(),
                 } as any);
             }
+            if (order.orderStatus === OrderStatus.CANCELLED) {
+                order.paymentRetryEnabled = false;
+                order.set("paymentRetryExpiresAt", null);
+            }
             cancelledOrder = order;
             await order.save({ session });
             await session.commitTransaction();
@@ -1187,6 +1271,8 @@ export class OrderService {
         } finally {
             await session.endSession();
         }
+        try { await EarningService.reconcileOrder(orderId); await this.notifyCancellation(orderId); }
+        catch { console.error("Cancellation follow-up deferred", orderId); }
         if (refundRequest) {
             try {
                 if (!cancelledOrder?.razorpayPaymentId) {
@@ -1239,6 +1325,7 @@ export class OrderService {
                 notificationError,
             );
         }
+        if (!mongoose.isValidObjectId(orderId)) throw new Error("Invalid order ID");
         return await Order.findOne({
             _id: orderId,
             user: userId,
@@ -1375,6 +1462,10 @@ export class OrderService {
                     requestedAt: new Date(),
                 } as any);
             }
+            if (order.orderStatus === OrderStatus.CANCELLED) {
+                order.paymentRetryEnabled = false;
+                order.set("paymentRetryExpiresAt", null);
+            }
             cancelledOrder = order;
             await order.save({ session });
             await session.commitTransaction();
@@ -1388,6 +1479,8 @@ export class OrderService {
         } finally {
             await session.endSession();
         }
+        try { await EarningService.reconcileOrder(orderId); await this.notifyCancellation(orderId); }
+        catch { console.error("Cancellation follow-up deferred", orderId); }
         if (refundRequest) {
             try {
                 if (!cancelledOrder?.razorpayPaymentId) {
@@ -1441,6 +1534,7 @@ export class OrderService {
                 notificationError,
             );
         }
+        if (!mongoose.isValidObjectId(orderId)) throw new Error("Invalid order ID");
         return await Order.findOne({
             _id: orderId,
             user: userId,

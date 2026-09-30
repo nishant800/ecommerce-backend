@@ -1,0 +1,27 @@
+export function paise(value: number): number {
+    const result = Math.round(value * 100);
+    if (!Number.isSafeInteger(result) || result < 0) throw new Error("Invalid monetary amount");
+    return result;
+}
+export function commission(amount: number, basisPoints: number) {
+    if (!Number.isSafeInteger(amount) || !Number.isInteger(basisPoints) || basisPoints < 0 || basisPoints > 10000) throw new Error("Invalid commission");
+    return Number((BigInt(amount) * BigInt(basisPoints) + 5000n) / 10000n);
+}
+export function allocate(amount: number, weights: number[]) {
+    const total = weights.reduce((a, b) => a + b, 0);
+    if (!total) return weights.map(() => 0);
+    const capped = Math.min(amount, total);
+    const shares = weights.map(w => Number(BigInt(capped) * BigInt(w) / BigInt(total)));
+    let remainder = capped - shares.reduce((a, b) => a + b, 0);
+    for (let i = 0; remainder > 0 && i < shares.length; i++) if (shares[i] < weights[i]) { shares[i]++; remainder--; }
+    return shares;
+}
+export function financeConfig() {
+    const percent = process.env.MARKETPLACE_COMMISSION_PERCENT;
+    if (!percent && process.env.NODE_ENV === "production") throw new Error("Marketplace commission must be configured");
+    const bps = Math.round(Number(percent || 0) * 100);
+    const holdDays = Number(process.env.SELLER_SETTLEMENT_HOLD_DAYS || 7);
+    const minimum = Number(process.env.SELLER_PAYOUT_MINIMUM_PAISE || 10000);
+    if (!Number.isInteger(bps) || bps < 0 || bps > 10000 || !Number.isFinite(holdDays) || holdDays < 0 || !Number.isSafeInteger(minimum) || minimum < 100) throw new Error("Invalid settlement configuration");
+    return { bps, holdMs: holdDays * 86400000, minimum };
+}
