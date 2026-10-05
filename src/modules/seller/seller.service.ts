@@ -37,6 +37,7 @@ import {
 
 const sellerVisibleOrderFilter = () => ({
     $or: [
+        { fulfillmentType: "pickup", sellerReleasedAt: { $ne: null } },
         {
             sellerReleasedAt: {
                 $ne: null,
@@ -63,6 +64,7 @@ const sellerVisibleOrderFilter = () => ({
 const sellerOrderView = (order: any, seller: string) => {
     if (!order) return null;
     const value = typeof order.toJSON === "function" ? order.toJSON() : order;
+    if (value.fulfillmentType === "pickup") return { ...value, serverNow: new Date().toISOString() };
     const onlyThisSeller = value.items.every((item: any) => String(item.seller?._id || item.seller) === seller);
     value.items = value.items.map((item: any, index: number) => ({ ...item, orderItemIndex: index }))
         .filter((item: any) => String(item.seller?._id || item.seller) === seller);
@@ -384,6 +386,8 @@ export class SellerService {
         sellerId: string
     ) {
 
+        const { PickupService } = await import("../orders/pickup.service.js");
+        await PickupService.expireFor({ "pickup.sellerId": sellerId });
         if (!mongoose.isValidObjectId(sellerId)) throw new Error("Invalid seller ID");
         const sellerObjectId =
             new mongoose.Types.ObjectId(
@@ -490,6 +494,7 @@ export class SellerService {
         if (!["shipped", "delivered", "cancelled"].includes(status)) throw new Error("Invalid order transition");
         const order = await Order.findOne({ _id: orderId, "items.seller": sellerId, ...sellerVisibleOrderFilter() });
         if (!order) return null;
+        if (order.fulfillmentType === "pickup") throw new Error("Use the Store Pickup actions for this order");
         if (status === "cancelled") {
             // Reuse customer cancellation's transactional quantity restoration and refund reconciliation.
             for (let index = 0; index < order.items.length; index++) {
@@ -702,6 +707,13 @@ export class SellerService {
             "object"
         ) {
 
+            if (data.business.pickupEnabled === true) {
+                const b = { ...seller.business, ...data.business };
+                if (!b.shopName?.trim() || !b.address?.trim() || !b.city?.trim() || !b.state?.trim() || !/^\d{6}$/.test(b.pincode || '') || !(b.shopPhone || seller.phone)) throw new Error('Complete your business address before enabling Store Pickup');
+            }
+            if (typeof data.business.pickupEnabled === "boolean") {
+                updateData["business.pickupEnabled"] = data.business.pickupEnabled;
+            }
             const allowedFields = [
 
                 "shopName",

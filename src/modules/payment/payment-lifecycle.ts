@@ -12,7 +12,7 @@ export async function releaseSellerNotifications(orderId: string) {
         await session.withTransaction(async () => {
             const order = await Order.findById(orderId).session(session);
             if (!order || !order.sellerReleasedAt || order.orderStatus === OrderStatus.CANCELLED || order.sellerNewOrderNotifiedAt) return;
-            const cod = /^cod$/i.test(order.paymentMethod);
+            const cod = /^cod$/i.test(order.paymentMethod) || (order.fulfillmentType === "pickup" && order.paymentMethod === "pay_at_store");
             if (!cod && order.paymentStatus !== PaymentStatus.SUCCESS) return;
             for (const seller of new Set(order.items.filter(i => i.quantity > i.cancelledQuantity).map(i => String(i.seller)))) {
                 await NotificationService.enqueue({ userId: seller, recipientRole: NotificationRecipientRole.SELLER,
@@ -39,7 +39,13 @@ export async function confirmCapturedPayment(orderId: string, paymentId: string,
         ...(eventId ? { paymentWebhookEventIds: { $setUnion: [{ $ifNull: ["$paymentWebhookEventIds", []] }, [eventId]] } } : {}),
     } }], { new: false });
     if (!previous) throw new Error("Conflicting payment reference");
-    if (previous.paymentStatus !== PaymentStatus.SUCCESS) await Cart.updateOne({ user: previous.user }, { $set: { items: [] } });
+    if (previous.fulfillmentType === "pickup") {
+        const { PickupService } = await import("../orders/pickup.service.js");
+        await Order.updateOne({ _id: orderId }, { $set: { paidAt: new Date(), paymentMethod: "online" }, $inc: { __v: 1 } });
+        await PickupService.expireFor({ _id: orderId });
+        await Order.updateOne({ _id: orderId, "pickup.status": { $in: ["expired", "cancelled"] } }, { $set: { "pickup.refundRequired": true } });
+    }
+    if (previous.fulfillmentType !== "pickup" && previous.paymentStatus !== PaymentStatus.SUCCESS) await Cart.updateOne({ user: previous.user }, { $set: { items: [] } });
     const { OrderService } = await import("../orders/order.service.js");
     await OrderService.reconcileCancelledPaidOrder(orderId);
     await releaseSellerNotifications(orderId);

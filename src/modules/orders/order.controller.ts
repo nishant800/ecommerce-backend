@@ -1,3 +1,4 @@
+import { PickupService } from "./pickup.service.js";
 import { releaseSellerNotifications } from "../payment/payment-lifecycle.js";
 import { Response } from "express";
 import Order from "./order.model.js";
@@ -162,18 +163,29 @@ export const createOrder = async (
         // =========================================
         // REQUEST DATA
         // =========================================
-        const {
-            items,
-            shippingAddress,
-            paymentMethod,
-        } = req.body;
+        const { items, paymentMethod, fulfillmentType = "delivery", pickupRequestKey } = req.body;
+        const isPickup = fulfillmentType === "pickup";
+        if (!["delivery", "pickup"].includes(fulfillmentType)) throw new Error("Invalid fulfillment type");
+        let shippingAddress = req.body.shippingAddress;
+        let pickupSeller: any;
+        if (isPickup) {
+            if (!/^[a-zA-Z0-9_-]{16,100}$/.test(pickupRequestKey || "")) throw new Error("A pickup request key is required");
+            const replay = await Order.findOne({ user: userId, pickupRequestKey }).select("+pickup.token");
+            if (replay) return res.json({ success: true, data: replay, serverNow: new Date().toISOString() });
+            if (!Array.isArray(items) || !items.length || items.length > 50) throw new Error("Invalid pickup items");
+            const first = await Product.findById(items[0].product);
+            pickupSeller = await PickupService.eligibleSeller(first?.seller);
+            const b = pickupSeller.business;
+            shippingAddress = { fullName: b.shopName, phone: b.shopPhone || pickupSeller.phone, house: b.address,
+                area: b.area || b.address, city: b.city, state: b.state, pincode: b.pincode, country: b.country || "India" };
+        }
         const normalizedPaymentMethod =
             String(
                 paymentMethod || "COD"
             )
                 .trim()
                 .toLowerCase();
-        if (!["cod", "online", "razorpay"].includes(normalizedPaymentMethod)) throw new Error("Invalid payment method");
+        if (!(isPickup ? ["pay_at_store", "online", "razorpay"] : ["cod", "online", "razorpay"]).includes(normalizedPaymentMethod)) throw new Error("Invalid payment method");
         const isCodPayment =
             normalizedPaymentMethod ===
             "cod";
@@ -215,10 +227,8 @@ export const createOrder = async (
             "444002",
         ];
         if (
-            normalizedDeliveryCity !== "akola" ||
-            !allowedDeliveryPincodes.includes(
-                deliveryPincode
-            )
+            !isPickup && (normalizedDeliveryCity !== "akola" ||
+            !allowedDeliveryPincodes.includes(deliveryPincode))
         ) {
             return res.status(400).json({
             serverTime: new Date().toISOString(),
@@ -242,6 +252,12 @@ export const createOrder = async (
         session =
             await mongoose.startSession();
         session.startTransaction();
+        if (isPickup) {
+            pickupSeller = await PickupService.eligibleSeller(pickupSeller._id, session);
+            const b = pickupSeller.business;
+            shippingAddress = { fullName: b.shopName, phone: b.shopPhone || pickupSeller.phone, house: b.address,
+                area: b.area || b.address, city: b.city, state: b.state, pincode: b.pincode, country: b.country || 'India' };
+        }
         // =========================================
         // BUILD ORDER ITEMS
         // =========================================
@@ -286,6 +302,7 @@ export const createOrder = async (
                     `Product not found: ${item.product}`
                 );
             }
+            if (isPickup && String(product.seller) !== String(pickupSeller._id)) throw new Error("Reserve products from one pickup seller at a time");
             if (!product.active) {
                 throw new Error(
                     `Product ${product.name} is no longer available`,
@@ -791,7 +808,7 @@ export const createOrder = async (
                 calculatedsubtotal
             );
         const calculatedShippingCharge =
-            calculatedsubtotal < 500
+            !isPickup && calculatedsubtotal < 500
                 ? 30
                 : 0;
         // Included GST disclosure; total and delivery calculation below are unchanged.
@@ -807,10 +824,13 @@ export const createOrder = async (
         // =========================================
         // CREATE ORDER INSIDE SAME TRANSACTION
         // =========================================
+        const pickup = isPickup ? PickupService.reservation(pickupSeller) : undefined;
         const [order] =
             await Order.create(
                 [
                     {
+                        fulfillmentType,
+                        ...(isPickup ? { pickup, pickupRequestKey } : {}),
                         user:
                             userId,
                         items:
@@ -830,11 +850,9 @@ export const createOrder = async (
                         total:
                             calculatedTotal,
                         paymentMethod:
-                            paymentMethod ||
-                            "COD",
-                        paymentStatus:
-                            "pending",
-                        paymentRetryEnabled: !isCodPayment,
+                            isPickup ? normalizedPaymentMethod : paymentMethod || "COD",
+                        paymentStatus: isPickup && calculatedTotal === 0 ? "success" : "pending",
+                        paymentRetryEnabled: !isPickup && !isCodPayment,
                         // Merchant-settled online sales must never become payable after switching modes.
                         sellerPayoutDisabled: !isCodPayment && isSingleSellerMode(),
                         settlementEnabled: true,
@@ -846,7 +864,7 @@ export const createOrder = async (
                         // payment is confirmed by the
                         // payment service/webhook.
                         sellerReleasedAt:
-                            isCodPayment
+                            (isCodPayment || isPickup)
                                 ? new Date()
                                 : null,
                         orderStatus:
@@ -890,7 +908,7 @@ export const createOrder = async (
             // Online orders must not be sent
             // to sellers before payment is
             // confirmed. COD is released here.
-            if (isCodPayment) {
+            if (isCodPayment || isPickup) {
                 await releaseSellerNotifications(String(order._id));
             }
         } catch (
@@ -924,7 +942,9 @@ export const createOrder = async (
         // =========================================
         // RESPONSE
         // =========================================
+        if (isPickup) await PickupService.notifyConfirmed(String(order._id));
         return res.status(201).json({
+            serverNow: new Date().toISOString(),
             serverTime: new Date().toISOString(),
             success:
                 true,
@@ -941,11 +961,16 @@ export const createOrder = async (
                 // Ignore abort errors.
             }
         }
+        if (req.body.fulfillmentType === "pickup" && req.user?.userId && req.body.pickupRequestKey) {
+            const replay = await Order.findOne({ user: req.user.userId, pickupRequestKey: req.body.pickupRequestKey }).select("+pickup.token");
+            if (replay) return res.json({ success: true, data: replay, serverNow: new Date().toISOString() });
+        }
         console.error(
             "CREATE ORDER ERROR:",
             error
         );
         return res.status(
+            req.body.fulfillmentType === "pickup" ? (error?.hasErrorLabel?.("TransientTransactionError") ? 409 : 400) :
             error?.message?.includes(
                 "out of stock"
             ) ||

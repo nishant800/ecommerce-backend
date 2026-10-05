@@ -120,7 +120,28 @@ export interface IShippingAddress {
 // =========================================
 // ORDER
 // =========================================
+export interface IPickup {
+    sellerId: mongoose.Types.ObjectId;
+    sellerName: string;
+    address: { shopName: string; address: string; area?: string; landmark?: string; city: string; state: string; pincode: string; country: string; shopPhone?: string };
+    status: 'reserved' | 'ready' | 'picked_up' | 'expired' | 'cancelled';
+    reservedAt: Date;
+    expiresAt: Date;
+    token?: string;
+    code: string;
+    pickedUpAt?: Date;
+    cancelledAt?: Date;
+    expiredAt?: Date;
+    inventoryReleased: boolean;
+    refundRequired: boolean;
+    stockReleaseIssues?: string[];
+}
 export interface IOrder extends Document {
+    fulfillmentType?: 'delivery' | 'pickup';
+    pickup?: IPickup;
+    pickupRequestKey?: string;
+    paidAt?: Date;
+    paymentCollectedBySeller?: mongoose.Types.ObjectId;
     user: mongoose.Types.ObjectId;
     items: IOrderItem[];
     shippingAddress: IShippingAddress;
@@ -493,6 +514,21 @@ const ShippingAddressSchema =
 // =========================================
 const OrderSchema = new Schema<IOrder>(
     {
+        fulfillmentType: { type: String, enum: ['delivery', 'pickup'], default: 'delivery' },
+        pickupRequestKey: { type: String, select: false },
+        paidAt: { type: Date },
+        paymentCollectedBySeller: { type: Schema.Types.ObjectId, ref: 'User' },
+        pickup: { type: new Schema<IPickup>({
+            sellerId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+            sellerName: { type: String, required: true },
+            address: { shopName: String, address: String, area: String, landmark: String, city: String, state: String, pincode: String, country: String, shopPhone: String },
+            status: { type: String, enum: ['reserved', 'ready', 'picked_up', 'expired', 'cancelled'], required: true },
+            reservedAt: { type: Date, required: true }, expiresAt: { type: Date, required: true },
+            token: { type: String, select: false }, code: { type: String, required: true },
+            pickedUpAt: Date, cancelledAt: Date, expiredAt: Date,
+            inventoryReleased: { type: Boolean, default: false }, refundRequired: { type: Boolean, default: false },
+            stockReleaseIssues: [String],
+        }, { _id: false }), default: undefined },
         gstAmount: { type: Number, min: 0 },
         gstDetailsComplete: { type: Boolean },
         cgstAmount: { type: Number, min: 0 },
@@ -740,6 +776,9 @@ OrderSchema.set("toJSON", { transform: (_doc, ret) => {
     Reflect.deleteProperty(ret, "settlementRevision");
     return ret;
 } });
+OrderSchema.index({ fulfillmentType: 1, 'pickup.status': 1, 'pickup.expiresAt': 1 });
+OrderSchema.index({ user: 1, pickupRequestKey: 1 }, { unique: true, partialFilterExpression: { pickupRequestKey: { $type: 'string' } } });
+OrderSchema.index({ 'pickup.code': 1 }, { unique: true, partialFilterExpression: { 'pickup.code': { $type: 'string' } } });
 const Order: Model<IOrder> =
     mongoose.models.Order ||
     mongoose.model<IOrder>(

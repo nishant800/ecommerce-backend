@@ -47,6 +47,11 @@ export class PaymentService {
 
     static async createPayment(orderId: string, userId: string) {
         if (!mongoose.isValidObjectId(orderId)) throw new Error("Invalid order ID");
+        const pickupOrder = await Order.findOne({ _id: orderId, user: userId, fulfillmentType: 'pickup' });
+        if (pickupOrder) {
+            const { PickupService } = await import('../orders/pickup.service.js');
+            return PickupService.createPayment(orderId, userId);
+        }
         const { OrderService } = await import("../orders/order.service.js");
         await OrderService.expirePaymentOrder(orderId);
         const now = new Date();

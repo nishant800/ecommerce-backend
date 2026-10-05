@@ -99,7 +99,7 @@ const recalculateAggregateRefundStatus = (order: any) => {
     }
     return RefundStatus.NONE;
 };
-const restoreStockForItem = async (
+export const restoreStockForItem = async (
     product: any,
     item: any,
     session: mongoose.ClientSession,
@@ -426,6 +426,8 @@ export class OrderService {
                 try { await this.expirePaymentOrder(String(order._id)); }
                 catch { console.error("Payment expiry failed; will retry", String(order._id)); }
             }
+            const { PickupService } = await import("./pickup.service.js");
+            await PickupService.expireFor();
             await NotificationService.dispatchPending();
         } finally { this.expiryRunning = false; }
     }
@@ -688,6 +690,8 @@ export class OrderService {
     static async getMyOrders(
         userId: string
     ) {
+        const { PickupService } = await import("./pickup.service.js");
+        await PickupService.expireFor({ user: userId });
         return await Order.find({
             user: userId,
         }).sort({
@@ -702,6 +706,8 @@ export class OrderService {
         orderId: string
     ) {
         if (!mongoose.isValidObjectId(orderId)) throw new Error("Invalid order ID");
+        const { PickupService } = await import("./pickup.service.js");
+        await PickupService.expireFor({ _id: orderId, user: userId });
         return await Order.findOne({
             _id: orderId,
             user: userId,
@@ -1110,6 +1116,11 @@ export class OrderService {
         orderId: string,
         itemIndex: number,
     ) {
+        const pickupOrder = await Order.findOne({ _id: orderId, user: userId, fulfillmentType: "pickup" });
+        if (pickupOrder) {
+            throw new Error("Cancel the Store Pickup reservation using its pickup card");
+        }
+
         if (!Number.isInteger(itemIndex)) {
             throw new Error("Invalid order item.");
         }
@@ -1350,6 +1361,14 @@ export class OrderService {
         userId: string,
         orderId: string
     ) {
+        const pickupOrder = await Order.findOne({ _id: orderId, user: userId, fulfillmentType: "pickup" });
+        if (pickupOrder) {
+            const { PickupService } = await import("./pickup.service.js");
+            await PickupService.expireFor({ _id: orderId, user: userId });
+            await PickupService.release(orderId, "cancelled", userId);
+            return this.getOrder(userId, orderId);
+        }
+
         const session =
             await mongoose.startSession();
         let cancelledOrder: any = null;

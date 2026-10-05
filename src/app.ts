@@ -1,3 +1,4 @@
+import { customerPickupRoutes, sellerPickupRoutes } from "./modules/orders/pickup.routes.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import { sellerFinanceRoutes, adminFinanceRoutes } from "./modules/payout/payout.routes.js";
 import { payoutWebhook } from "./modules/payout/payout.webhook.controller.js";
@@ -47,6 +48,8 @@ app.use(
 // =========================================
 app.post("/api/payout/webhook", express.raw({ type: "application/json" }), payoutWebhook);
 app.use(express.json());
+app.use("/api/orders", customerPickupRoutes);
+app.use("/api/seller", sellerPickupRoutes);
 app.use("/api/seller", sellerFinanceRoutes);
 app.use("/api/admin", adminFinanceRoutes);
 app.use(

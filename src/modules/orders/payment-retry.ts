@@ -4,6 +4,7 @@ export const PAYMENT_RETRY_WINDOW_MS = 15 * 60 * 1000;
 export const onlineMethods = /^(online|razorpay)$/i;
 export function expiredPaymentFilter(now = new Date()) {
     return {
+        fulfillmentType: { $ne: "pickup" },
         paymentRetryEnabled: true,
         paymentMethod: onlineMethods,
         paymentStatus: { $in: [PaymentStatus.PENDING, PaymentStatus.FAILED] },

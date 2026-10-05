@@ -1,3 +1,4 @@
+import Order from "./modules/orders/order.model.js";
 import "dotenv/config";
 import { OrderService } from "./modules/orders/order.service.js";
 import { initializeFinanceIndexes, startSettlementScheduler } from "./modules/payout/payout.scheduler.js";
@@ -10,6 +11,7 @@ import {
 } from "./scripts/seedPolicies.js";
 const start = async () => {
     await connectDatabase();
+    await Order.init();
     await initializeFinanceIndexes();
     await seedDefaultCatalog();
     await seedPolicies();

@@ -16,6 +16,7 @@ export enum UserRole {
 // SELLER BUSINESS DETAILS
 // =========================================
 export interface ISellerBusiness {
+    pickupEnabled?: boolean;
     shopName: string;
     // Complete shop / return address
     address: string;
@@ -92,6 +93,7 @@ const SellerBusinessSchema =
             // =================================
             // SHOP NAME
             // =================================
+            pickupEnabled: { type: Boolean, default: false },
             shopName: {
                 type: String,
                 trim: true,
