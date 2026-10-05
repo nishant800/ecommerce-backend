@@ -7,8 +7,9 @@ const endpoint = (handler: (req: AuthRequest) => Promise<unknown>) => async (req
     catch (error: any) { return res.status(400).json({ success: false, message: error.message, serverNow: new Date().toISOString() }); }
 };
 export const customerPickupRoutes = Router();
-customerPickupRoutes.use(authenticate);
+// Public product information only; all subsequent pickup routes require authentication.
 customerPickupRoutes.get('/pickup/availability/:productId', endpoint(req => PickupService.availability(String(req.params.productId))));
+customerPickupRoutes.use(authenticate);
 customerPickupRoutes.get('/:id/pickup', endpoint(req => PickupService.detail(String(req.params.id), req.user!.userId)));
 customerPickupRoutes.post('/:id/pickup/cancel', endpoint(async req => {
     await PickupService.expireFor({ _id: req.params.id, user: req.user!.userId });

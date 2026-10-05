@@ -35,12 +35,17 @@ export class PickupService {
     static async availability(productId: string) {
         if (!mongoose.isValidObjectId(productId)) throw new Error('Invalid product ID');
         const product = await Product.findOne({ _id: productId, active: true });
-        if (!product || product.stock <= 0) return { available: false };
+        if (!product) return { available: false, reason: 'Store Pickup unavailable for this product' };
+        if (product.stock <= 0) return { available: false, reason: 'Store Pickup unavailable: out of stock' };
         try {
             const seller = await this.eligibleSeller(product.seller);
-            return { available: true, sellerId: seller._id, sellerName: seller.business!.shopName,
-                address: this.reservation(seller).address, stock: product.stock };
-        } catch { return { available: false }; }
+            const b = seller.business!;
+            // Explicit public allowlist: never expose the seller's account phone or private data.
+            return { available: true, sellerName: b.shopName,
+                address: { shopName: b.shopName, address: b.address, area: b.area, landmark: b.landmark,
+                    city: b.city, state: b.state, pincode: b.pincode, country: b.country || 'India' },
+                stock: product.stock };
+        } catch { return { available: false, reason: 'Seller does not currently offer Store Pickup at a valid address' }; }
     }
     static async enqueue(order: any, status: string, session: mongoose.ClientSession) {
         const message = status === 'reserved' ? 'Your item is reserved for Store Pickup for 2 hours.' : `Store Pickup ${status.replace('_', ' ')}. Check the order for details.`;
