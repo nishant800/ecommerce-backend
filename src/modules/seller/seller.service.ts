@@ -1,3 +1,4 @@
+import { getMissingPickupAddressFields } from './pickup-profile-validation.js';
 import { OrderService } from "../orders/order.service.js";
 import { EarningService } from "../payout/earning.service.js";
 import { OrderStatus, PaymentStatus } from "../orders/order.model.js";
@@ -708,8 +709,17 @@ export class SellerService {
         ) {
 
             if (data.business.pickupEnabled === true) {
-                const b = { ...seller.business, ...data.business };
-                if (!b.shopName?.trim() || !b.address?.trim() || !b.city?.trim() || !b.state?.trim() || !/^\d{6}$/.test(b.pincode || '') || !(b.shopPhone || seller.phone)) throw new Error('Complete your business address before enabling Store Pickup');
+                // Match the string-only, trimmed fields that the profile update actually saves.
+                const business = { ...seller.toObject().business, ...Object.fromEntries(
+                    Object.entries(data.business).filter(([, value]) => typeof value === 'string')
+                        .map(([field, value]) => [field, (value as string).trim()])
+                ) };
+                const missing = getMissingPickupAddressFields({
+                    business, phone: updateData.phone || seller.phone,
+                });
+                if (missing.length) {
+                    throw Object.assign(new Error(`Complete ${missing.length === 1 ? 'this detail' : 'these details'} first: ${missing.join(', ')}`), { missingFields: missing });
+                }
             }
             if (typeof data.business.pickupEnabled === "boolean") {
                 updateData["business.pickupEnabled"] = data.business.pickupEnabled;

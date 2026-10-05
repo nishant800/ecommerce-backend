@@ -310,6 +310,7 @@ export class SellerController {
                 message:
                     error.message ||
                     "Failed to update seller profile",
+                ...(Array.isArray(error.missingFields) ? { missingFields: error.missingFields } : {}),
             });
         }
     }
