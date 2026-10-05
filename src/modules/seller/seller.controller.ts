@@ -311,6 +311,7 @@ export class SellerController {
                     error.message ||
                     "Failed to update seller profile",
                 ...(Array.isArray(error.missingFields) ? { missingFields: error.missingFields } : {}),
+                ...(error.activePickupCount ? { activePickupCount: error.activePickupCount } : {}),
             });
         }
     }

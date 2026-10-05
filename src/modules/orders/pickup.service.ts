@@ -1,3 +1,4 @@
+import { getSellerPickupAvailability } from './pickup-schedule.js';
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import Order, { OrderStatus, PaymentStatus } from './order.model.js';
@@ -18,13 +19,19 @@ export function assertActivePickup(order: any, now = new Date()) {
 export class PickupService {
     static async eligibleSeller(id: unknown, session?: mongoose.ClientSession) {
         if (!mongoose.isValidObjectId(id)) throw new Error('Pickup seller not found');
-        const seller = await User.findOne({ _id: id, role: 'seller', isActive: true }).select('name phone business').session(session || null);
+        const seller = session
+            ? await User.findOneAndUpdate({ _id: id, role: 'seller', isActive: true }, { $inc: { 'business.pickupScheduleRevision': 1 } }, { new: true, session }).select('name phone business')
+            : await User.findOne({ _id: id, role: 'seller', isActive: true }).select('name phone business');
         const b = seller?.business;
         if (!b?.pickupEnabled || !b.shopName?.trim() || !b.address?.trim() || !b.city?.trim() || !b.state?.trim() || !/^\d{6}$/.test(b.pincode || '') || !(b.shopPhone || seller?.phone)) throw new Error('Seller does not currently offer Store Pickup at a valid address');
+        const schedule = getSellerPickupAvailability(seller);
+        if (!schedule.available) throw new Error(schedule.availabilityLine);
         return seller!;
     }
     static reservation(seller: any, now = new Date()) {
         const b = seller.business;
+        const schedule = getSellerPickupAvailability(seller, now);
+        if (!schedule.available) throw new Error(schedule.availabilityLine);
         return { sellerId: seller._id, sellerName: b.shopName, address: { shopName: b.shopName, address: b.address,
             area: b.area, landmark: b.landmark, city: b.city, state: b.state, pincode: b.pincode,
             country: b.country || 'India', shopPhone: b.shopPhone || seller.phone },
@@ -38,10 +45,13 @@ export class PickupService {
         if (!product) return { available: false, reason: 'Store Pickup unavailable for this product' };
         if (product.stock <= 0) return { available: false, reason: 'Store Pickup unavailable: out of stock' };
         try {
-            const seller = await this.eligibleSeller(product.seller);
-            const b = seller.business!;
+            const seller = await User.findOne({ _id: product.seller, role: 'seller', isActive: true }).select('business phone');
+            const b0 = seller?.business;
+            if (!b0?.shopName?.trim() || !b0.address?.trim() || !b0.city?.trim() || !b0.state?.trim() || !/^\d{6}$/.test(b0.pincode || '') || !(b0.shopPhone?.trim() || seller?.phone?.trim())) return { available: false, reason: 'Seller does not currently offer Store Pickup at a valid address' };
+            const schedule = getSellerPickupAvailability(seller);
+            const b = seller!.business!;
             // Explicit public allowlist: never expose the seller's account phone or private data.
-            return { available: true, sellerName: b.shopName,
+            return { available: schedule.available, reason: schedule.availabilityLine, schedule, sellerName: b.shopName,
                 address: { shopName: b.shopName, address: b.address, area: b.area, landmark: b.landmark,
                     city: b.city, state: b.state, pincode: b.pincode, country: b.country || 'India' },
                 stock: product.stock };
@@ -123,7 +133,8 @@ export class PickupService {
         if (!order) throw new Error('Pickup order not found');
         const value = order.toJSON();
         if (value.pickup && !activePickup.includes(value.pickup.status)) delete value.pickup.token;
-        return { ...value, serverNow: new Date().toISOString() };
+        const store = await User.findById(value.pickup?.sellerId).select('business');
+        return { ...value, storeSchedule: getSellerPickupAvailability(store), serverNow: new Date().toISOString() };
     }
     static async validate(reference: string, sellerId: string) {
         const ref = String(reference || '').trim();

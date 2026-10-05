@@ -1,3 +1,4 @@
+import { defaultPickupSchedule, type PickupSchedule } from '../orders/pickup-schedule.js';
 import mongoose, {
     Schema,
     Document,
@@ -17,6 +18,8 @@ export enum UserRole {
 // =========================================
 export interface ISellerBusiness {
     pickupEnabled?: boolean;
+    pickupSchedule?: PickupSchedule;
+    pickupScheduleRevision?: number;
     shopName: string;
     // Complete shop / return address
     address: string;
@@ -94,6 +97,8 @@ const SellerBusinessSchema =
             // SHOP NAME
             // =================================
             pickupEnabled: { type: Boolean, default: false },
+            pickupSchedule: { type: Schema.Types.Mixed, default: defaultPickupSchedule },
+            pickupScheduleRevision: { type: Number, default: 0 },
             shopName: {
                 type: String,
                 trim: true,

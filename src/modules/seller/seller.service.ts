@@ -1,3 +1,4 @@
+import { getSellerPickupAvailability, validatePickupSchedule, pickupLocalDate } from '../orders/pickup-schedule.js';
 import { getMissingPickupAddressFields } from './pickup-profile-validation.js';
 import { OrderService } from "../orders/order.service.js";
 import { EarningService } from "../payout/earning.service.js";
@@ -62,10 +63,13 @@ const sellerVisibleOrderFilter = () => ({
 });
 
 
-const sellerOrderView = (order: any, seller: string) => {
+const sellerOrderView = async (order: any, seller: string, schedule?: ReturnType<typeof getSellerPickupAvailability>) => {
     if (!order) return null;
     const value = typeof order.toJSON === "function" ? order.toJSON() : order;
-    if (value.fulfillmentType === "pickup") return { ...value, serverNow: new Date().toISOString() };
+    if (value.fulfillmentType === "pickup") {
+        const status = schedule || getSellerPickupAvailability(await User.findById(seller).select('business'));
+        return { ...value, storeSchedule: status, serverNow: new Date().toISOString() };
+    }
     const onlyThisSeller = value.items.every((item: any) => String(item.seller?._id || item.seller) === seller);
     value.items = value.items.map((item: any, index: number) => ({ ...item, orderItemIndex: index }))
         .filter((item: any) => String(item.seller?._id || item.seller) === seller);
@@ -430,7 +434,12 @@ export class SellerService {
 
                 "name phone business"
 
-            ).then(result => Array.isArray(result) ? result.map(order => sellerOrderView(order, sellerId)) : sellerOrderView(result, sellerId));
+            ).then(async result => {
+                const orders = Array.isArray(result) ? result : [result];
+                const schedule = orders.some(order => order?.fulfillmentType === 'pickup')
+                    ? getSellerPickupAvailability(await User.findById(sellerId).select('business')) : undefined;
+                return Array.isArray(result) ? Promise.all(result.map(order => sellerOrderView(order, sellerId, schedule))) : sellerOrderView(result, sellerId, schedule);
+            });
     }
 
 
@@ -482,7 +491,12 @@ export class SellerService {
 
                 "name phone business"
 
-            ).then(result => Array.isArray(result) ? result.map(order => sellerOrderView(order, sellerId)) : sellerOrderView(result, sellerId));
+            ).then(async result => {
+                const orders = Array.isArray(result) ? result : [result];
+                const schedule = orders.some(order => order?.fulfillmentType === 'pickup')
+                    ? getSellerPickupAvailability(await User.findById(sellerId).select('business')) : undefined;
+                return Array.isArray(result) ? Promise.all(result.map(order => sellerOrderView(order, sellerId, schedule))) : sellerOrderView(result, sellerId, schedule);
+            });
     }
 
 
@@ -587,6 +601,7 @@ export class SellerService {
 
 
         const updateData: any = {};
+        let cancelPickupIds: string[] = [];
 
 
         // =====================================
@@ -708,6 +723,23 @@ export class SellerService {
             "object"
         ) {
 
+            if (data.business.pickupSchedule !== undefined) {
+                const schedule = validatePickupSchedule(data.business.pickupSchedule);
+                const previous = seller.business?.pickupSchedule;
+                const addedDates = schedule.specialClosures.filter(entry => !previous?.specialClosures?.some(old => old.date === entry.date)).map(entry => entry.date);
+                const newlyTemporary = schedule.temporarilyClosed && !previous?.temporarilyClosed;
+                const activeOrders = await Order.find({ fulfillmentType: 'pickup', 'pickup.sellerId': sellerId,
+                    'pickup.status': { $in: ['reserved', 'ready'] }, 'pickup.expiresAt': { $gt: new Date() } }).select('_id pickup');
+                const affected = activeOrders.filter(order => newlyTemporary || addedDates.includes(pickupLocalDate(order.pickup!.reservedAt)));
+                if (affected.length && !['keep', 'cancel'].includes(data.pickupClosureAction)) {
+                    throw Object.assign(new Error(`You have ${affected.length} active pickup reservations${newlyTemporary ? '' : ' on this date'}. Choose whether to keep existing reservations or cancel affected reservations.`), { activePickupCount: affected.length });
+                }
+                updateData['business.pickupSchedule'] = schedule;
+                // Schedule edits alone never invalidate existing reservations.
+                if (affected.length && data.pickupClosureAction === 'cancel') {
+                    cancelPickupIds = affected.map(order => String(order._id));
+                }
+            }
             if (data.business.pickupEnabled === true) {
                 // Match the string-only, trimmed fields that the profile update actually saves.
                 const business = { ...seller.toObject().business, ...Object.fromEntries(
@@ -796,7 +828,7 @@ export class SellerService {
         }
 
 
-        return await User.findOneAndUpdate(
+        const updated = await User.findOneAndUpdate(
 
             {
 
@@ -828,6 +860,16 @@ export class SellerService {
         ).select(
             "-password"
         );
+        if (updated && cancelPickupIds.length) {
+            const { PickupService } = await import('../orders/pickup.service.js');
+            for (const id of cancelPickupIds) {
+                // A reservation may expire or complete between confirmation and cancellation.
+                const active = await Order.exists({ _id: id, 'pickup.sellerId': sellerId,
+                    'pickup.status': { $in: ['reserved', 'ready'] }, 'pickup.expiresAt': { $gt: new Date() } });
+                if (active) await PickupService.release(id, 'cancelled');
+            }
+        }
+        return updated;
     }
 
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { after, before, test, mock } from 'node:test';
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 process.env.NODE_ENV = 'test';
@@ -36,13 +36,14 @@ let paymentFixture: any;
 razorpay.payments.fetch = async () => paymentFixture;
 let seller: any; let otherSeller: any; let buyer: any;
 before(async () => {
+    mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-05T11:30:00Z').getTime() });
     await mongoose.connect(`mongodb://127.0.0.1:27119/pickup_fixture_${process.pid}?replicaSet=financeTest`, { serverSelectionTimeoutMS: 15000 });
     await Promise.all([Order.init(), Product.init(), User.init(), Notification.init()]);
     const makeSeller = (tag: string) => User.create({ name: tag, email: `${tag}@fixture.test`, phone: tag === 'seller' ? '9999999901' : '9999999902', password: 'fixture-password', role: 'seller', business: { pickupEnabled: true, shopName: tag, address: '1 Market Street', city: 'Akola', state: 'Maharashtra', pincode: '444001', country: 'India' } });
     seller = await makeSeller('seller'); otherSeller = await makeSeller('other');
     buyer = await User.create({ name: 'Buyer', email: 'buyer@fixture.test', phone: '9999999903', password: 'fixture-password', role: 'customer' });
 });
-after(async () => { await mongoose.disconnect(); });
+after(async () => { await mongoose.disconnect(); mock.timers.reset(); });
 async function product(stock = 4, overrides: any = {}) {
     return Product.create({ name: 'Pickup Fixture', slug: crypto.randomUUID(), sku: crypto.randomUUID(), price: 100, discountPrice: 80, stock,
         seller: seller._id, category: new mongoose.Types.ObjectId(), subcategory: new mongoose.Types.ObjectId(), brand: new mongoose.Types.ObjectId(), active: true, ...overrides });
@@ -163,4 +164,45 @@ test('delivery checkout, old orders and generic item-cancellation guards remain 
     assert.ok(await OrderService.getOrder(String(buyer._id), String(delivery.body.data._id)));
     const pickup = await reserve(p); await assert.rejects(OrderService.cancelOrderItem(String(buyer._id), String(pickup.body.data._id), 0), /pickup/i);
     const visible = await SellerService.getOrders(String(seller._id)); assert.ok(visible.some((o: any) => String(o._id) === String(pickup.body.data._id)));
+});
+
+test('schedule edits preserve existing QR and expiry; new reservations reject closures; cancellation remains explicit', async () => {
+    const p = await product(); const reserved = await reserve(p); assert.equal(reserved.body.success, true);
+    const id = String(reserved.body.data._id); const token = reserved.body.data.pickup.token;
+    const expiry = new Date(reserved.body.data.pickup.expiresAt).getTime();
+    const store = await User.findById(seller._id); const schedule = structuredClone(store!.business!.pickupSchedule!);
+    schedule.specialClosures = [{ date: '2026-10-05', reason: 'Maintenance' }];
+    await assert.rejects(SellerService.updateProfile(String(seller._id), { business: { pickupSchedule: schedule } }), (error: any) => error.activePickupCount > 0);
+    assert.equal((await User.findById(seller._id))!.business!.pickupSchedule!.specialClosures.length, 0);
+    await SellerService.updateProfile(String(seller._id), { business: { pickupSchedule: schedule }, pickupClosureAction: 'keep' });
+    assert.equal((await reserve(p)).body.success, false);
+    const detail = await PickupService.validate(token, String(seller._id)); assert.equal(detail.pickup!.status, 'reserved'); assert.equal(new Date(detail.pickup!.expiresAt).getTime(), expiry); assert.equal(detail.storeSchedule.isOpen, false);
+    const available = await PickupService.availability(String(p._id)); assert.equal(available.available, false);
+    const publicPayload = JSON.stringify(available); assert.ok(!publicPayload.includes(seller.phone)); assert.ok(!publicPayload.includes('password'));
+    schedule.specialClosures = []; schedule.temporarilyClosed = true;
+    await assert.rejects(SellerService.updateProfile(String(seller._id), { business: { pickupSchedule: schedule } }), (error: any) => error.activePickupCount > 0);
+    await SellerService.updateProfile(String(seller._id), { business: { pickupSchedule: schedule }, pickupClosureAction: 'keep' });
+    assert.equal((await PickupService.validate(token, String(seller._id))).pickup!.status, 'reserved');
+    schedule.temporarilyClosed = false; await SellerService.updateProfile(String(seller._id), { business: { pickupSchedule: schedule } });
+    await PickupService.release(id, 'cancelled', String(buyer._id));
+});
+
+test('actual creation at 5 PM and 6 PM succeeds; 6:01 PM fails without stock deduction', async () => {
+    const p = await product();
+    try {
+        mock.timers.setTime(new Date('2026-10-05T11:30:00Z').getTime()); assert.equal((await reserve(p)).body.success, true);
+        mock.timers.setTime(new Date('2026-10-05T12:30:00Z').getTime()); const exact = await reserve(p); assert.equal(exact.body.success, true);
+        assert.equal(new Date(exact.body.data.pickup.expiresAt).getTime() - new Date(exact.body.data.pickup.reservedAt).getTime(), PICKUP_WINDOW_MS);
+        mock.timers.setTime(new Date('2026-10-05T12:31:00Z').getTime()); const denied = await reserve(p); assert.equal(denied.body.success, false); assert.match(denied.body.message, /unavailable after/);
+        assert.equal((await Product.findById(p._id))!.stock, 2);
+    } finally { mock.timers.setTime(new Date('2026-10-05T11:30:00Z').getTime()); }
+});
+test('seller explicitly cancelling closure conflicts reuses paid-order refund and restores inventory', async () => {
+    const p = await product(); const reserved = await reserve(p, 'online'); assert.equal(reserved.body.success, true);
+    const id = String(reserved.body.data._id); await verify(id); const prior = refundCalls;
+    const store = await User.findById(seller._id); const schedule = structuredClone(store!.business!.pickupSchedule!);
+    schedule.specialClosures = [{ date: '2026-10-05', reason: 'Holiday' }];
+    await SellerService.updateProfile(String(seller._id), { business: { pickupSchedule: schedule }, pickupClosureAction: 'cancel' });
+    const cancelled = await Order.findById(id); assert.equal(cancelled!.pickup!.status, 'cancelled'); assert.equal(cancelled!.refundStatus, 'processed'); assert.ok(refundCalls > prior);
+    assert.equal((await Product.findById(p._id))!.stock, 4);
 });
