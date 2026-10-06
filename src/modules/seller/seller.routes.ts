@@ -5,6 +5,7 @@ import { SellerController } from "./seller.controller.js";
 const router = Router();
 router.use(authenticate);
 router.use(sellerOnly);
+router.post("/delivery/scan", SellerController.deliveryScan);
 router.get(
     "/dashboard",
     SellerController.dashboard

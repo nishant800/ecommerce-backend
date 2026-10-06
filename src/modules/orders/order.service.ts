@@ -1144,10 +1144,11 @@ export class OrderService {
             }
             if (
                 order.orderStatus !== OrderStatus.PENDING &&
+                order.orderStatus !== OrderStatus.PROCESSING &&
                 order.orderStatus !== OrderStatus.PARTIALLY_CANCELLED
             ) {
                 throw new Error(
-                    "Products can only be cancelled while the order is pending."
+                    "Products can only be cancelled before the order is shipped."
                 );
             }
             if (
@@ -1391,10 +1392,11 @@ export class OrderService {
             }
             if (
                 order.orderStatus !== OrderStatus.PENDING &&
+                order.orderStatus !== OrderStatus.PROCESSING &&
                 order.orderStatus !== OrderStatus.PARTIALLY_CANCELLED
             ) {
                 throw new Error(
-                    "Order can only be cancelled while it is pending."
+                    "Order can only be cancelled before it is shipped."
                 );
             }
             let restoredAnyItem = false;

@@ -386,13 +386,14 @@ test("webhook before verify and simultaneous verify/capture do not duplicate ear
 test("unpaid seller endpoints reject access, COD releases immediately but never becomes a bank earning", async () => {
     const unpaid = await fixture();
     assert.equal(await SellerService.getOrder(String(seller), String(unpaid.order._id)), null);
-    assert.equal(await SellerService.updateOrderStatus(String(seller), String(unpaid.order._id), "shipped"), null);
+    await assert.rejects(SellerService.updateOrderStatus(String(seller), String(unpaid.order._id), "shipped"), /shipping label/i);
     assert.equal(await SellerService.markOrderShippedAfterLabel(String(seller), String(unpaid.order._id)), null);
     const cod = await fixture({ paymentMethod: "COD", paymentRetryEnabled: false, sellerReleasedAt: new Date() });
     const { releaseSellerNotifications } = await import("../src/modules/payment/payment-lifecycle.js");
     await Promise.all([releaseSellerNotifications(String(cod.order._id)), releaseSellerNotifications(String(cod.order._id))]);
     assert.equal(await Notification.countDocuments({ dedupeKey: `new-order:${cod.order._id}:${seller}` }), 1);
-    await SellerService.updateOrderStatus(String(seller), String(cod.order._id), "shipped");
+    await SellerService.markOrderShippedAfterLabel(String(seller), String(cod.order._id));
+    await SellerService.updateOrderStatus(String(seller), String(cod.order._id), "out_for_delivery");
     await SellerService.updateOrderStatus(String(seller), String(cod.order._id), "delivered");
     assert.equal((await Earning.findOne({ order: cod.order._id }))!.status, "MANUAL");
 });

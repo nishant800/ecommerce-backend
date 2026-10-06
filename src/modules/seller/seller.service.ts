@@ -1,3 +1,4 @@
+import { canProcessDelivery, isDeliveryPlaced, startDeliveryProcessing } from "../orders/delivery-lifecycle.js";
 import { getSellerPickupAvailability, validatePickupSchedule, pickupLocalDate } from '../orders/pickup-schedule.js';
 import { getMissingPickupAddressFields } from './pickup-profile-validation.js';
 import { OrderService } from "../orders/order.service.js";
@@ -63,6 +64,15 @@ const sellerVisibleOrderFilter = () => ({
 });
 
 
+const normalizeDeliveryStatus = (status: unknown): string => {
+    const value = String(status || 'pending').trim().toLowerCase();
+    if (['placed', 'confirmed', 'partially_cancelled'].includes(value)) return 'pending';
+    if (value === 'completed') return 'delivered';
+    if (value === 'out for delivery') return 'out_for_delivery';
+    if (value === 'canceled') return 'cancelled';
+    return value;
+};
+
 const sellerOrderView = async (order: any, seller: string, schedule?: ReturnType<typeof getSellerPickupAvailability>) => {
     if (!order) return null;
     const value = typeof order.toJSON === "function" ? order.toJSON() : order;
@@ -70,14 +80,23 @@ const sellerOrderView = async (order: any, seller: string, schedule?: ReturnType
         const status = schedule || getSellerPickupAvailability(await User.findById(seller).select('business'));
         return { ...value, storeSchedule: status, serverNow: new Date().toISOString() };
     }
+    if (canProcessDelivery(value) && isDeliveryPlaced(value.orderStatus)) {
+        value.items = value.items.map((item: any) => ({ ...item, fulfilmentStatus: isDeliveryPlaced(item.fulfilmentStatus || value.orderStatus) ? "processing" : item.fulfilmentStatus }));
+        if (value.orderStatus !== "partially_cancelled") value.orderStatus = "processing";
+    }
+    value.orderStatus = normalizeDeliveryStatus(value.orderStatus);
     const onlyThisSeller = value.items.every((item: any) => String(item.seller?._id || item.seller) === seller);
-    value.items = value.items.map((item: any, index: number) => ({ ...item, orderItemIndex: index }))
+    value.items = value.items.map((item: any, index: number) => ({ ...item, fulfilmentStatus: normalizeDeliveryStatus(item.fulfilmentStatus || value.orderStatus), orderItemIndex: index }))
         .filter((item: any) => String(item.seller?._id || item.seller) === seller);
     const active = value.items.filter((item: any) => item.quantity > (item.cancelledQuantity || 0));
-    if (!active.length) value.orderStatus = "cancelled";
+    if (value.orderStatus === "cancelled" || !active.length) value.orderStatus = "cancelled";
     else if (active.every((item: any) => item.fulfilmentStatus === "delivered")) value.orderStatus = "delivered";
+    else if (active.some((item: any) => item.fulfilmentStatus === "out_for_delivery")) value.orderStatus = "out_for_delivery";
     else if (active.some((item: any) => item.fulfilmentStatus === "shipped" || item.fulfilmentStatus === "delivered")) value.orderStatus = "shipped";
+    else if (active.some((item: any) => item.fulfilmentStatus === "processing")) value.orderStatus = "processing";
     else if (active.every((item: any) => item.fulfilmentStatus === "pending")) value.orderStatus = "pending";
+    value.processingAt = active.find((item: any) => item.processingAt)?.processingAt || value.processingAt;
+    value.outForDeliveryAt = active.find((item: any) => item.outForDeliveryAt)?.outForDeliveryAt || value.outForDeliveryAt;
     value.subtotal = value.items.reduce((total: number, item: any) => total + item.price * Math.max(0, item.quantity - (item.cancelledQuantity || 0)), 0);
     value.total = value.subtotal;
     value.shippingCharge = 0;
@@ -504,9 +523,10 @@ export class SellerService {
     // UPDATE ORDER STATUS
     // =========================================
 
-    static async updateOrderStatus(sellerId: string, orderId: string, status: string) {
+    static async updateOrderStatus(sellerId: string, orderId: string, status: string, labelGenerated = false) {
+        if (status === "shipped" && !labelGenerated) throw new Error("Generate a shipping label to mark this order shipped");
         if (!mongoose.isValidObjectId(orderId)) throw new Error("Invalid order ID");
-        if (!["shipped", "delivered", "cancelled"].includes(status)) throw new Error("Invalid order transition");
+        if (!["processing", "shipped", "out_for_delivery", "delivered", "cancelled"].includes(status)) throw new Error("Invalid order transition");
         const order = await Order.findOne({ _id: orderId, "items.seller": sellerId, ...sellerVisibleOrderFilter() });
         if (!order) return null;
         if (order.fulfillmentType === "pickup") throw new Error("Use the Store Pickup actions for this order");
@@ -522,14 +542,23 @@ export class SellerService {
             const session = await mongoose.startSession();
             try { await session.withTransaction(async () => {
                 const current = await Order.findOne({ _id: orderId, "items.seller": sellerId, ...sellerVisibleOrderFilter() }).session(session);
-                if (!current || current.orderStatus === OrderStatus.CANCELLED) throw new Error("Order is unavailable");
+                if (!current || current.fulfillmentType === "pickup" || current.orderStatus === OrderStatus.CANCELLED) throw new Error("Order is unavailable");
+                if (!canProcessDelivery(current)) throw new Error("Payment must be confirmed before processing");
+                startDeliveryProcessing(current);
+                // Snapshot legacy item state before changing the aggregate order status.
+                for (const item of current.items) {
+                    item.fulfilmentStatus = normalizeDeliveryStatus(item.fulfilmentStatus || current.orderStatus);
+                }
                 const items = current.items.filter(i => String(i.seller) === sellerId && i.quantity > i.cancelledQuantity);
                 if (!items.length) throw new Error("No active seller items");
                 for (const item of items) {
                     const previous = item.fulfilmentStatus || current.orderStatus;
                     if (previous === status) continue;
-                    if ((status === "shipped" && previous !== "pending") || (status === "delivered" && previous !== "shipped")) throw new Error("Invalid order transition");
+                    if ((status === "processing" && previous !== "pending") || (status === "shipped" && previous !== "processing") || (status === "out_for_delivery" && previous !== "shipped") || (status === "delivered" && previous !== "out_for_delivery")) throw new Error("Invalid order transition");
+                    if (item.refundStatus === 'processed' || item.refundStatus === 'pending') throw new Error('Refunded items cannot be dispatched');
                     item.fulfilmentStatus = status;
+                    if (status === "processing") item.processingAt = new Date();
+                    if (status === "out_for_delivery") item.outForDeliveryAt = new Date();
                     if (status === "delivered") item.deliveredAt = new Date();
                 }
                 const active = current.items.filter(i => i.quantity > i.cancelledQuantity);
@@ -537,10 +566,18 @@ export class SellerService {
                     current.orderStatus = OrderStatus.DELIVERED;
                     current.deliveredAt = current.deliveredAt || new Date();
                     if (/^cod$/i.test(current.paymentMethod)) current.paymentStatus = PaymentStatus.SUCCESS;
-                } else { current.orderStatus = OrderStatus.SHIPPED; current.shippedAt = current.shippedAt || new Date(); }
+                } else if (active.some(i => i.fulfilmentStatus === 'out_for_delivery')) {
+                    current.orderStatus = OrderStatus.OUT_FOR_DELIVERY;
+                    current.outForDeliveryAt = current.outForDeliveryAt || new Date();
+                } else if (active.some(i => ['shipped', 'delivered'].includes(i.fulfilmentStatus || ''))) {
+                    current.orderStatus = OrderStatus.SHIPPED; current.shippedAt = current.shippedAt || new Date();
+                } else {
+                    current.orderStatus = OrderStatus.PROCESSING; current.processingAt = current.processingAt || new Date();
+                }
+                if (status === 'shipped') current.shippingLabelGeneratedAt = current.shippingLabelGeneratedAt || new Date();
                 await current.save({ session });
-                await NotificationService.enqueue({ userId: current.user, type: status === "shipped" ? NotificationType.ORDER_SHIPPED : NotificationType.ORDER_DELIVERED,
-                    title: status === "shipped" ? "Order Shipped" : "Order Delivered", message: `Your items from this seller have been ${status}.`,
+                await NotificationService.enqueue({ userId: current.user, recipientRole: NotificationRecipientRole.CUSTOMER, type: status === "processing" ? NotificationType.GENERAL : status === "shipped" ? NotificationType.ORDER_SHIPPED : status === "out_for_delivery" ? NotificationType.GENERAL : NotificationType.ORDER_DELIVERED,
+                    title: status === "processing" ? "Order Processing" : status === "shipped" ? "Order Shipped" : status === "out_for_delivery" ? "Out for Delivery" : "Order Delivered", message: status === "processing" ? "Your order is being processed." : status === "shipped" ? "Your order has been shipped." : status === "out_for_delivery" ? "Your order is out for delivery." : "Your order has been delivered.",
                     orderId: current._id, dedupeKey: `seller-order-status:${orderId}:${sellerId}:${status}` }, session);
             }); } finally { await session.endSession(); }
         }
@@ -548,11 +585,30 @@ export class SellerService {
         return this.getOrder(sellerId, orderId);
     }
 
+    static async resolveDeliveryBarcode(sellerId: string, barcode: unknown) {
+        if (typeof barcode !== 'string' || barcode.length > 512) throw new Error('Invalid delivery barcode');
+        let reference = barcode.trim();
+        // Existing Code 128 labels contain the full order ID; existing QR labels wrap that ID.
+        if (reference.startsWith('{')) {
+            try { reference = JSON.parse(reference).orderId; } catch { throw new Error('Invalid delivery barcode'); }
+        }
+        if (typeof reference !== 'string' || !/^[a-f0-9]{24}$/i.test(reference)) throw new Error('Scan an order shipping label, not a product/SKU barcode');
+        const order = await this.getOrder(sellerId, reference);
+        if (!order) throw new Error('Delivery order not found or does not belong to this seller');
+        if (order.fulfillmentType === 'pickup') throw new Error('Store Pickup is not a Home Delivery order');
+        const active = order.items.filter((item: any) => item.quantity > (item.cancelledQuantity || 0));
+        if (order.orderStatus === "cancelled" || !active.length || active.some((item: any) => ['pending', 'processed'].includes(item.refundStatus))) {
+            return { order, allowedAction: null, message: order.orderStatus === 'cancelled' || !active.length ? 'Order cancelled' : 'Refunded orders cannot be dispatched' };
+        }
+        const states = active.map((item: any) => item.fulfilmentStatus || order.orderStatus);
+        const allowedAction = states.every((state: string) => state === 'shipped') ? 'MARK_OUT_FOR_DELIVERY'
+            : states.every((state: string) => state === 'out_for_delivery') ? 'MARK_DELIVERED' : null;
+        return { order, allowedAction, message: allowedAction ? undefined : order.orderStatus === 'delivered' ? 'Order already delivered' : 'Order is not ready for delivery' };
+    }
+
     static async markOrderShippedAfterLabel(sellerId: string, orderId: string) {
-        const order = await this.updateOrderStatus(sellerId, orderId, "shipped");
-        if (order) await Order.updateOne({ _id: orderId, "items.seller": sellerId, ...sellerVisibleOrderFilter() },
-            { $set: { shippingLabelGeneratedAt: new Date() } });
-        return order;
+        // The existing label endpoint is the only seller path into Shipped.
+        return this.updateOrderStatus(sellerId, orderId, "shipped", true);
     }
 
     static async getProfile(

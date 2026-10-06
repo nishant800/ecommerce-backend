@@ -2,6 +2,12 @@ import { Response } from "express";
 import { AuthRequest } from "../../middleware/auth.middleware.js";
 import { SellerService } from "./seller.service.js";
 export class SellerController {
+    static async deliveryScan(req: AuthRequest, res: Response) {
+        if (!req.user?.userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+        try { return res.json({ success: true, data: await SellerService.resolveDeliveryBarcode(req.user.userId, req.body?.barcode) }); }
+        catch (error: any) { return res.status(400).json({ success: false, message: error.message || 'Invalid delivery barcode' }); }
+    }
+
     // =========================================
     // DASHBOARD
     // =========================================
@@ -203,7 +209,7 @@ export class SellerController {
                 return res.status(404).json({
                     success: false,
                     message:
-                        "Pending order not found or does not belong to this seller",
+                        "Processing order not found or does not belong to this seller",
                 });
             }
             return res.json({

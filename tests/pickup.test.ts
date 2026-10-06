@@ -37,7 +37,8 @@ razorpay.payments.fetch = async () => paymentFixture;
 let seller: any; let otherSeller: any; let buyer: any;
 before(async () => {
     mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-05T11:30:00Z').getTime() });
-    await mongoose.connect(`mongodb://127.0.0.1:27119/pickup_fixture_${process.pid}?replicaSet=financeTest`, { serverSelectionTimeoutMS: 15000 });
+    // Keep driver heartbeat timing outside this short suite while schedule tests jump the mocked Date clock.
+    await mongoose.connect(`mongodb://127.0.0.1:27119/pickup_fixture_${process.pid}?replicaSet=financeTest`, { serverSelectionTimeoutMS: 15000, heartbeatFrequencyMS: 60000 });
     await Promise.all([Order.init(), Product.init(), User.init(), Notification.init()]);
     const makeSeller = (tag: string) => User.create({ name: tag, email: `${tag}@fixture.test`, phone: tag === 'seller' ? '9999999901' : '9999999902', password: 'fixture-password', role: 'seller', business: { pickupEnabled: true, shopName: tag, address: '1 Market Street', city: 'Akola', state: 'Maharashtra', pincode: '444001', country: 'India' } });
     seller = await makeSeller('seller'); otherSeller = await makeSeller('other');
@@ -205,4 +206,65 @@ test('seller explicitly cancelling closure conflicts reuses paid-order refund an
     await SellerService.updateProfile(String(seller._id), { business: { pickupSchedule: schedule }, pickupClosureAction: 'cancel' });
     const cancelled = await Order.findById(id); assert.equal(cancelled!.pickup!.status, 'cancelled'); assert.equal(cancelled!.refundStatus, 'processed'); assert.ok(refundCalls > prior);
     assert.equal((await Product.findById(p._id))!.stock, 4);
+});
+
+test('strict delivery lifecycle, first/second label lookup, terminal states and seller security', async () => {
+    const p = await product();
+    const address = { fullName: 'Delivery Buyer', phone: '9999999903', house: '1', area: 'Market', city: 'Akola', state: 'Maharashtra', pincode: '444001', country: 'India' };
+    const result = await reserve(p, 'COD', { fulfillmentType: 'delivery', pickupRequestKey: undefined, shippingAddress: address });
+    assert.equal(result.body.success, true); const id = String(result.body.data._id); const owner = String(seller._id);
+    assert.equal((await SellerService.resolveDeliveryBarcode(owner, id)).allowedAction, null);
+    assert.equal((await Order.findById(id))!.orderStatus, 'processing');
+    await assert.rejects(SellerService.updateOrderStatus(owner, id, 'delivered'), /transition/i);
+    assert.ok((await Order.findById(id))!.processingAt);
+    await assert.rejects(SellerService.updateOrderStatus(owner, id, 'shipped'), /shipping label/i);
+    await assert.rejects(SellerService.updateOrderStatus(owner, id, 'out_for_delivery'), /transition/i);
+    await SellerService.markOrderShippedAfterLabel(owner, id);
+    const preview = await SellerService.resolveDeliveryBarcode(owner, id); assert.equal(String(preview.order._id), id); assert.equal(preview.allowedAction, 'MARK_OUT_FOR_DELIVERY'); assert.ok((await Order.findById(id))!.shippingLabelGeneratedAt);
+    assert.equal((await SellerService.resolveDeliveryBarcode(owner, JSON.stringify({ orderId: id, total: 1 }))).order.orderStatus, 'shipped');
+    await assert.rejects(SellerService.resolveDeliveryBarcode(String(otherSeller._id), id), /belong/i);
+    await assert.rejects(SellerService.resolveDeliveryBarcode(owner, 'SKU-123'), /order shipping label/i);
+    await assert.rejects(SellerService.resolveDeliveryBarcode(owner, String(p._id)), /not found/i);
+    await assert.rejects(SellerService.resolveDeliveryBarcode(owner, '{}'), /order shipping label/i);
+    await assert.rejects(SellerService.updateOrderStatus(owner, id, 'delivered'), /transition/i);
+    const pickupProduct = await product();
+    const onRoad = await SellerService.updateOrderStatus(owner, id, 'out_for_delivery'); assert.equal(onRoad!.orderStatus, 'out_for_delivery');
+    const stored = await Order.findById(id); assert.equal(stored!.items[0].fulfilmentStatus, 'out_for_delivery'); assert.ok(stored!.outForDeliveryAt); assert.ok(stored!.items[0].outForDeliveryAt);
+    await SellerService.updateOrderStatus(owner, id, 'out_for_delivery');
+    const notifications = await Notification.find({ order: id, message: 'Your order is out for delivery.' }); assert.equal(notifications.length, 1);
+    assert.equal((await SellerService.resolveDeliveryBarcode(owner, id)).allowedAction, 'MARK_DELIVERED');
+    const done = await SellerService.updateOrderStatus(owner, id, 'delivered'); assert.equal(done!.orderStatus, 'delivered'); assert.equal((await Order.findById(id))!.paymentStatus, 'success');
+    const deliveredLookup = await SellerService.resolveDeliveryBarcode(owner, id);
+    assert.equal(deliveredLookup.allowedAction, null); assert.equal(deliveredLookup.message, 'Order already delivered');
+    const delivered = await Order.findById(id); assert.ok(delivered!.deliveredAt); assert.ok(delivered!.items[0].deliveredAt);
+    assert.equal((await Notification.find({ order: id, message: 'Your order has been shipped.' })).length, 1);
+    assert.equal((await Notification.find({ order: id, message: 'Your order has been delivered.' })).length, 1);
+    await assert.rejects(SellerService.updateOrderStatus(owner, id, 'out_for_delivery'), /transition/i);
+    const defaultSettings = (await User.findById(seller._id))!.business!.pickupSchedule!;
+    defaultSettings.specialClosures = []; await SellerService.updateProfile(owner, { business: { pickupSchedule: defaultSettings } });
+    const pickupResult = await reserve(pickupProduct); assert.equal(pickupResult.body.success, true);
+    await assert.rejects(SellerService.resolveDeliveryBarcode(owner, String(pickupResult.body.data._id)), /Store Pickup/i);
+    await assert.rejects(SellerService.updateOrderStatus(owner, String(pickupResult.body.data._id), 'out_for_delivery'), /Store Pickup/i);
+    await PickupService.release(String(pickupResult.body.data._id), 'cancelled', String(buyer._id));
+});
+
+
+test('delivery item preparation cannot advance another seller; legacy missing fulfillment and terminal lookups remain compatible', async () => {
+    const a = await product(); const b = await product(4, { seller: otherSeller._id });
+    const result = await reserve(a, 'COD', { fulfillmentType: 'delivery', pickupRequestKey: undefined,
+        shippingAddress: { fullName: 'Buyer', phone: '9999999903', house: '1', area: 'Market', city: 'Akola', state: 'Maharashtra', pincode: '444001', country: 'India' },
+        items: [{ product: String(a._id), quantity: 1 }, { product: String(b._id), quantity: 1 }] });
+    assert.equal(result.body.success, true); const id = String(result.body.data._id);
+    await Order.updateOne({ _id: id }, { $unset: { fulfillmentType: 1 } });
+    assert.equal((await SellerService.getOrder(String(otherSeller._id), id))!.orderStatus, 'processing');
+    await SellerService.markOrderShippedAfterLabel(String(seller._id), id);
+    assert.equal((await SellerService.resolveDeliveryBarcode(String(seller._id), id)).allowedAction, 'MARK_OUT_FOR_DELIVERY');
+    assert.equal((await SellerService.resolveDeliveryBarcode(String(otherSeller._id), id)).allowedAction, null);
+    await Order.updateOne({ _id: id }, { $set: { orderStatus: 'cancelled' } });
+    assert.equal((await SellerService.resolveDeliveryBarcode(String(seller._id), id)).allowedAction, null);
+    await Order.updateOne({ _id: id }, { $set: { orderStatus: 'shipped', 'items.0.refundStatus': 'pending' } });
+    assert.equal((await SellerService.resolveDeliveryBarcode(String(seller._id), id)).allowedAction, null);
+    await assert.rejects(SellerService.updateOrderStatus(String(seller._id), id, 'out_for_delivery'), /Refunded/i);
+    await Order.updateOne({ _id: id }, { $set: { 'items.0.cancelledQuantity': 1 } });
+    assert.equal((await SellerService.resolveDeliveryBarcode(String(seller._id), id)).allowedAction, null);
 });

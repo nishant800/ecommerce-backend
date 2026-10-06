@@ -8,7 +8,9 @@ import mongoose, {
 // =========================================
 export enum OrderStatus {
     PENDING = "pending",
+    PROCESSING = "processing",
     SHIPPED = "shipped",
+    OUT_FOR_DELIVERY = "out_for_delivery",
     DELIVERED = "delivered",
     CANCELLED = "cancelled",
     PARTIALLY_CANCELLED = "partially_cancelled",
@@ -66,6 +68,8 @@ export interface IOrderItem {
     cancelledQuantity: number;
     cancelledAt?: Date;
     fulfilmentStatus?: string;
+    processingAt?: Date;
+    outForDeliveryAt?: Date;
     deliveredAt?: Date;
     // Internal refund request reference. It is stable for
     // this cancellation attempt and is used as the Razorpay
@@ -189,7 +193,9 @@ export interface IOrder extends Document {
     // SHIPPING LABEL
     // =====================================
     shippingLabelGeneratedAt?: Date;
+    processingAt?: Date;
     shippedAt?: Date;
+    outForDeliveryAt?: Date;
     deliveredAt?: Date;
     // =====================================
     // RAZORPAY
@@ -297,7 +303,9 @@ const OrderItemSchema = new Schema<IOrderItem>(
             type: Date,
             default: null,
         },
-        fulfilmentStatus: { type: String, enum: ["pending", "shipped", "delivered"], default: undefined },
+        outForDeliveryAt: { type: Date, default: null },
+        processingAt: { type: Date, default: null },
+        fulfilmentStatus: { type: String, enum: ["pending", "processing", "shipped", "out_for_delivery", "delivered"], default: undefined },
         deliveredAt: { type: Date, default: null },
         refundRequestId: {
             type: String,
@@ -649,6 +657,8 @@ const OrderSchema = new Schema<IOrder>(
             type: Date,
             default: null,
         },
+        processingAt: { type: Date, default: null },
+        outForDeliveryAt: { type: Date, default: null },
         shippedAt: {
             type: Date,
             default: null,

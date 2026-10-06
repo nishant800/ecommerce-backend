@@ -2,6 +2,7 @@ import { PickupService } from "./pickup.service.js";
 import { releaseSellerNotifications } from "../payment/payment-lifecycle.js";
 import { Response } from "express";
 import Order from "./order.model.js";
+import { startDeliveryProcessing } from "./delivery-lifecycle.js";
 import { AuthRequest } from "../../middleware/auth.middleware.js";
 import { OrderService } from "./order.service.js";
 import Product from "../products/product.model.js";
@@ -878,6 +879,10 @@ export const createOrder = async (
         // =========================================
         // COMMIT
         // =========================================
+        if (!isPickup && isCodPayment) {
+            startDeliveryProcessing(order);
+            await order.save({ session });
+        }
         await session.commitTransaction();
         // =========================================
         // CREATE ORDER NOTIFICATIONS

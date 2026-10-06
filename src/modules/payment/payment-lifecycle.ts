@@ -27,12 +27,27 @@ export async function releaseSellerNotifications(orderId: string) {
 }
 
 export async function confirmCapturedPayment(orderId: string, paymentId: string, eventId?: string) {
+    // Advance only placed delivery orders; duplicate captures never regress shipping or overwrite timestamps.
+    const startProcessing = { $and: [
+        { $ne: ["$fulfillmentType", "pickup"] },
+        { $in: ["$orderStatus", ["pending", "placed", "confirmed", "partially_cancelled"]] },
+    ] };
     // Pipeline reads CURRENT cancellation state atomically, including a concurrent expiry.
     const previous = await Order.findOneAndUpdate({ _id: orderId,
         $or: [{ razorpayPaymentId: "" }, { razorpayPaymentId: null }, { razorpayPaymentId: paymentId }],
     }, [{ $set: {
         paymentStatus: PaymentStatus.SUCCESS, razorpayPaymentId: { $literal: paymentId },
         paymentRetryEnabled: false, paymentRetryExpiresAt: null,
+        orderStatus: { $cond: [{ $and: [startProcessing, { $ne: ["$orderStatus", OrderStatus.PARTIALLY_CANCELLED] }] }, OrderStatus.PROCESSING, "$orderStatus"] },
+        processingAt: { $cond: [startProcessing, { $ifNull: ["$processingAt", "$$NOW"] }, "$processingAt"] },
+        items: { $cond: [startProcessing, { $map: { input: "$items", as: "item", in: { $cond: [
+            { $and: [
+                { $gt: ["$$item.quantity", { $ifNull: ["$$item.cancelledQuantity", 0] }] },
+                { $in: [{ $ifNull: ["$$item.fulfilmentStatus", "pending"] }, ["pending", "placed", "confirmed"]] },
+            ] },
+            { $mergeObjects: ["$$item", { fulfilmentStatus: OrderStatus.PROCESSING, processingAt: { $ifNull: ["$$item.processingAt", { $ifNull: ["$processingAt", "$$NOW"] }] } }] },
+            "$$item",
+        ] } } }, "$items"] },
         sellerReleasedAt: { $cond: [{ $eq: ["$orderStatus", OrderStatus.CANCELLED] },
             { $ifNull: ["$sellerReleasedAt", null] }, { $ifNull: ["$sellerReleasedAt", "$$NOW"] }] },
         __v: { $add: [{ $ifNull: ["$__v", 0] }, 1] },
