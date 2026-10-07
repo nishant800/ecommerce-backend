@@ -1399,6 +1399,9 @@ export class OrderService {
                     "Order can only be cancelled before it is shipped."
                 );
             }
+            if (order.items.some(item => item.quantity > (item.cancelledQuantity || 0) && ["shipped", "out_for_delivery", "delivered"].includes(item.fulfilmentStatus || ""))) {
+                throw new Error("Order can only be cancelled before it is shipped.");
+            }
             let restoredAnyItem = false;
             for (let index = 0; index < order.items.length; index++) {
                 const item: any = order.items[index];

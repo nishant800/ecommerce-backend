@@ -119,3 +119,51 @@ test('historical placed COD safely normalizes and can generate a label', async (
     assert.equal((await SellerService.getOrder(String(seller._id), String(o._id))).orderStatus, 'processing');
     assert.equal((await SellerService.markOrderShippedAfterLabel(String(seller._id), String(o._id))).orderStatus, 'shipped');
 });
+
+const { proposeAction, executeAction, refreshAction, availableActions, SupportActionAudit } = await import('../src/modules/support/support.actions.js');
+test('support cancellation uses the existing service once and preserves stock/refunds', async () => {
+    const p = await product(); const created = await deliver(p); const id = String(created.body.data._id);
+    const actor = { userId: String(buyer._id), role: 'customer' as const };
+    const proposal = await proposeAction(actor, { type: 'CANCEL_ORDER', resourceId: id });
+    assert.equal((await executeAction(actor, { actionToken: proposal.actionToken, confirmed: true })).message, 'Order cancelled.');
+    assert.equal((await Order.findById(id))!.orderStatus, 'cancelled'); assert.equal((await Product.findById(p._id))!.stock, 4);
+    await assert.rejects(executeAction(actor, { actionToken: proposal.actionToken, confirmed: true }), /already been used/);
+    assert.equal((await Product.findById(p._id))!.stock, 4);
+    assert.ok(await SupportActionAudit.exists({ resourceId: id, action: 'CANCEL_ORDER', result: 'succeeded' }));
+});
+test('support pickup ready and cancellation reuse stock/QR lifecycle; expired reserve again checks live availability', async () => {
+    const p = await product(); const created = await reserve(p); const id = String(created.body.data._id);
+    const owner = { userId: String(buyer._id), role: 'customer' as const }; const merchant = { userId: String(seller._id), role: 'seller' as const };
+    const ready = await proposeAction(merchant, { type: 'MARK_PICKUP_READY', resourceId: id });
+    await executeAction(merchant, { actionToken: ready.actionToken, confirmed: true }); assert.equal((await Order.findById(id))!.pickup!.status, 'ready');
+    const cancel = await proposeAction(owner, { type: 'CANCEL_PICKUP_RESERVATION', resourceId: id });
+    await executeAction(owner, { actionToken: cancel.actionToken, confirmed: true });
+    assert.equal((await Order.findById(id).select('+pickup.token'))!.pickup!.token, undefined); assert.equal((await Product.findById(p._id))!.stock, 4);
+    const again = await proposeAction(owner, { type: 'RESERVE_PICKUP_AGAIN', resourceId: id });
+    const result = await executeAction(owner, { actionToken: again.actionToken, confirmed: true }); assert.equal(result.workflow.resourceId, String(p._id));
+    assert.equal((await Order.findById(id))!.pickup!.status, 'cancelled');
+    const expiredOrder = await reserve(await product()); const expiredId = String(expiredOrder.body.data._id); await expire(expiredId);
+    assert.ok((await availableActions(owner, expiredId)).some(a => a.type === 'RESERVE_PICKUP_AGAIN'));
+    const staleReservation = await proposeAction(owner, { type: 'RESERVE_PICKUP_AGAIN', resourceId: expiredId });
+    await User.updateOne({ _id: seller._id }, { $set: { 'business.pickupSchedule.temporarilyClosed': true } });
+    await assert.rejects(executeAction(owner, { actionToken: staleReservation.actionToken, confirmed: true }), /unavailable|closed/i);
+    await User.updateOne({ _id: seller._id }, { $set: { 'business.pickupSchedule.temporarilyClosed': false } });
+    await Product.updateOne({ _id: p._id }, { $set: { stock: 0 } });
+    await assert.rejects(proposeAction(owner, { type: 'RESERVE_PICKUP_AGAIN', resourceId: id }), /no longer available/);
+});
+test('support payment and label handoffs require normal verified gateway/PDF workflows and backend result', async () => {
+    const pickup = await reserve(await product()); const pickupId = String(pickup.body.data._id);
+    const owner = { userId: String(buyer._id), role: 'customer' as const };
+    const pay = await proposeAction(owner, { type: 'PAY_PICKUP_ONLINE', resourceId: pickupId });
+    const payment = await executeAction(owner, { actionToken: pay.actionToken, confirmed: true }); assert.equal(payment.workflow.type, 'PAY_PICKUP_ONLINE');
+    assert.equal((await Order.findById(pickupId))!.paymentStatus, 'pending');
+    await verify(pickupId); assert.match((await refreshAction(owner, { actionToken: pay.actionToken })).message, /Payment confirmed by the backend/);
+    const delivery = await deliver(await product()); const id = String(delivery.body.data._id); const merchant = { userId: String(seller._id), role: 'seller' as const };
+    const label = await proposeAction(merchant, { type: 'GENERATE_SHIPPING_LABEL', resourceId: id });
+    const handoff = await executeAction(merchant, { actionToken: label.actionToken, confirmed: true }); assert.equal(handoff.workflow.type, 'GENERATE_SHIPPING_LABEL');
+    assert.equal((await Order.findById(id))!.orderStatus, 'processing');
+    await SellerService.markOrderShippedAfterLabel(String(seller._id), id);
+    assert.match((await refreshAction(merchant, { actionToken: label.actionToken })).message, /Order is Shipped/);
+    const actions = await availableActions(merchant, id); assert.equal(actions.some(a => a.type === 'GENERATE_SHIPPING_LABEL'), false);
+    await assert.rejects(proposeAction(merchant, { type: 'MARK_DELIVERED', resourceId: id }), /Unknown support action/);
+});

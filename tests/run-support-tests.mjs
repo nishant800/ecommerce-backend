@@ -1,0 +1,12 @@
+import fs from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
+const source = await fs.readFile(new URL('./support.test.ts', import.meta.url), 'utf8');
+const output = new URL('./support.generated.test.mjs', import.meta.url);
+await fs.writeFile(output, ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText.replaceAll('../src/', '../dist/'));
+const runtime = new URL('../../.local/finance-test-runtime/', import.meta.url);
+await fs.mkdir(runtime, { recursive: true });
+const result = spawnSync(process.execPath, ['--test', fileURLToPath(output)], { cwd: fileURLToPath(runtime), stdio: 'inherit' });
+await fs.unlink(output);
+process.exitCode = result.status ?? 1;
