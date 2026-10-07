@@ -16,6 +16,7 @@ export class CartController {
         try {
             const userId =
                 req.user!.userId;
+            res.set('Cache-Control', 'private, no-store');
             const cart =
                 await CartService.getCart(
                     userId,

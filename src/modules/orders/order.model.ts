@@ -36,6 +36,7 @@ export enum RefundStatus {
 // ORDER ITEM
 // =========================================
 export interface IOrderItem {
+    cartVariantId?: string;
     hsnCode?: string;
     gstRate?: number | null;
     gstAmount?: number | null;
@@ -141,6 +142,8 @@ export interface IPickup {
     stockReleaseIssues?: string[];
 }
 export interface IOrder extends Document {
+    checkoutSource?: "cart" | "buy_now";
+    cartClearedAt?: Date;
     fulfillmentType?: 'delivery' | 'pickup';
     pickup?: IPickup;
     pickupRequestKey?: string;
@@ -242,6 +245,7 @@ export interface IRefundRecord {
 // =========================================
 const OrderItemSchema = new Schema<IOrderItem>(
     {
+        cartVariantId: String,
         hsnCode: { type: String, default: "" },
         gstRate: { type: Number, default: null, min: 0, max: 100 },
         gstAmount: { type: Number, default: null, min: 0 },
@@ -522,6 +526,8 @@ const ShippingAddressSchema =
 // =========================================
 const OrderSchema = new Schema<IOrder>(
     {
+        checkoutSource: { type: String, enum: ['cart', 'buy_now'], default: 'cart' },
+        cartClearedAt: Date,
         fulfillmentType: { type: String, enum: ['delivery', 'pickup'], default: 'delivery' },
         pickupRequestKey: { type: String, select: false },
         paidAt: { type: Date },

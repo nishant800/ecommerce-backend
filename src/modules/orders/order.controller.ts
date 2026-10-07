@@ -1,3 +1,4 @@
+import { CartService } from '../cart/cart.service.js';
 import { PickupService } from "./pickup.service.js";
 import { releaseSellerNotifications } from "../payment/payment-lifecycle.js";
 import { Response } from "express";
@@ -165,6 +166,8 @@ export const createOrder = async (
         // REQUEST DATA
         // =========================================
         const { items, paymentMethod, fulfillmentType = "delivery", pickupRequestKey } = req.body;
+        const checkoutSource = req.body.checkoutSource || 'cart';
+        if (!['cart', 'buy_now'].includes(checkoutSource)) throw new Error('Invalid checkout source');
         const isPickup = fulfillmentType === "pickup";
         if (!["delivery", "pickup"].includes(fulfillmentType)) throw new Error("Invalid fulfillment type");
         let shippingAddress = req.body.shippingAddress;
@@ -765,6 +768,7 @@ export const createOrder = async (
             const destinationState = String(shippingAddress.state || "").trim() || "Maharashtra";
             const gst = inclusiveGst(finalPrice * quantity, product.gstRate, supplyState, destinationState);
             orderItems.push({
+                cartVariantId: selectedVariant?._id ? String(selectedVariant._id) : "",
                 hsnCode: product.hsnCode || "",
                 ...gst,
                 fulfilmentStatus: "pending",
@@ -831,6 +835,7 @@ export const createOrder = async (
                 [
                     {
                         fulfillmentType,
+                        checkoutSource,
                         ...(isPickup ? { pickup, pickupRequestKey } : {}),
                         user:
                             userId,
@@ -883,7 +888,9 @@ export const createOrder = async (
             startDeliveryProcessing(order);
             await order.save({ session });
         }
+        const cartRemoved = (isPickup || isCodPayment) ? await CartService.removePurchasedItems(order, session) : 0;
         await session.commitTransaction();
+        if (isPickup || isCodPayment) console.log('CART ITEMS REMOVED AFTER ORDER:', cartRemoved);
         // =========================================
         // CREATE ORDER NOTIFICATIONS
         // =========================================

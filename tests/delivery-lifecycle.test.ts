@@ -167,3 +167,77 @@ test('support payment and label handoffs require normal verified gateway/PDF wor
     const actions = await availableActions(merchant, id); assert.equal(actions.some(a => a.type === 'GENERATE_SHIPPING_LABEL'), false);
     await assert.rejects(proposeAction(merchant, { type: 'MARK_DELIVERED', resourceId: id }), /Unknown support action/);
 });
+
+const { default: Cart } = await import('../src/modules/cart/cart.model.js');
+const { CartService } = await import('../src/modules/cart/cart.service.js');
+test('COD removes only purchased cart quantity and unrelated lines survive', async () => {
+    const p = await product(6); const other = await product();
+    await Cart.findOneAndUpdate({ user: buyer._id }, { $set: { items: [{ product: p._id, quantity: 2 }, { product: other._id, quantity: 1 }] } }, { upsert: true });
+    const result = await deliver(p); assert.equal(result.status, 201);
+    let cart = await Cart.findOne({ user: buyer._id }); assert.equal(cart!.items.length, 2); assert.equal(cart!.items.find(i => String(i.product) === String(p._id))!.quantity, 1);
+    await deliver(p); cart = await Cart.findOne({ user: buyer._id }); assert.equal(cart!.items.length, 1); assert.equal(String(cart!.items[0].product), String(other._id));
+    assert.ok((await Order.findById(result.body.data._id))!.cartClearedAt);
+});
+test('cart variant/child identity and Buy Now preserve unrelated purchased-product lines', async () => {
+    const p = await product(8, { variants: [{ sku: 'CART-SIZE', price: 100, stock: 8, sizes: [{ size: '2.4', stock: 4 }, { size: '2.6', stock: 4 }] }] });
+    const v: any = p.variants[0];
+    await Cart.findOneAndUpdate({ user: buyer._id }, { $set: { items: [{ product: p._id, variantId: String(v._id), optionType: 'size', optionValue: '2.4', quantity: 1 }, { product: p._id, variantId: String(v._id), optionType: 'size', optionValue: '2.6', quantity: 1 }] } }, { upsert: true });
+    const items = [{ product: String(p._id), quantity: 1, variant: { sku: 'CART-SIZE', optionType: 'size', optionValue: '2.4' } }];
+    const result = await reserve(p, 'COD', { fulfillmentType: 'delivery', items, shippingAddress: { fullName: 'Buyer', phone: '9999999903', house: '1 Home', area: 'Market', city: 'Akola', state: 'Maharashtra', pincode: '444001' } });
+    assert.equal(result.status, 201); assert.equal((await Cart.findOne({ user: buyer._id }))!.items[0].optionValue, '2.6');
+    const other = await product(); await Cart.findOneAndUpdate({ user: buyer._id }, { $set: { items: [{ product: other._id, quantity: 1 }] } });
+    const buy = await deliver(other, 'COD'); // Default older clients are cart checkouts.
+    assert.equal(buy.status, 201); assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 0);
+    await Cart.findOneAndUpdate({ user: buyer._id }, { $set: { items: [{ product: other._id, quantity: 1 }] } });
+    const direct = await reserve(other, 'COD', { fulfillmentType: 'delivery', checkoutSource: 'buy_now', shippingAddress: { fullName: 'Buyer', phone: '9999999903', house: '1 Home', area: 'Market', city: 'Akola', state: 'Maharashtra', pincode: '444001' } });
+    assert.equal(direct.status, 201); assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 1);
+});
+test('online delivery retains cart through creation/failure and removes it exactly once after verified capture', async () => {
+    const p = await product(); const other = await product();
+    await Cart.findOneAndUpdate({ user: buyer._id }, { $set: { items: [{ product: p._id, quantity: 1 }, { product: other._id, quantity: 1 }] } });
+    const created = await deliver(p, 'online'); const id = String(created.body.data._id);
+    assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 2);
+    const { recordPaymentFailure } = await import('../src/modules/payment/payment-lifecycle.js'); await recordPaymentFailure(id, 'cart-failure');
+    assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 2);
+    const gateway = await PaymentService.createPayment(id, String(buyer._id));
+    paymentFixture = { order_id: gateway.razorpayOrder.id, status: 'captured', currency: 'INR', amount: gateway.razorpayOrder.amount };
+    const payId = 'pay_cart_verified'; const signature = crypto.createHmac('sha256', 'fixture-only').update(gateway.razorpayOrder.id + '|' + payId).digest('hex');
+    await assert.rejects(PaymentService.verifyPayment({ razorpay_order_id: gateway.razorpayOrder.id, razorpay_payment_id: payId, razorpay_signature: 'bad' }, String(buyer._id)));
+    assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 2);
+    const cleanup = CartService.removePurchasedItems;
+    CartService.removePurchasedItems = async (...args) => { await cleanup.apply(CartService, args); throw new Error('fixture captured cleanup failure'); };
+    try { await assert.rejects(PaymentService.verifyPayment({ razorpay_order_id: gateway.razorpayOrder.id, razorpay_payment_id: payId, razorpay_signature: signature }, String(buyer._id))); } finally { CartService.removePurchasedItems = cleanup; }
+    assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 2); assert.equal((await Order.findById(id))!.paymentStatus, 'pending');
+    await PaymentService.verifyPayment({ razorpay_order_id: gateway.razorpayOrder.id, razorpay_payment_id: payId, razorpay_signature: signature }, String(buyer._id));
+    assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 1);
+    await Cart.updateOne({ user: buyer._id }, { $push: { items: { product: p._id, quantity: 1 } } });
+    await confirmCapturedPayment(id, payId); assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 2);
+});
+test('pickup reservations clean cart once, replay preserves new cart, and failed transactional checkout preserves everything', async () => {
+    const p = await product(); await Cart.findOneAndUpdate({ user: buyer._id }, { $set: { items: [{ product: p._id, quantity: 1 }] } });
+    const key = crypto.randomUUID(); const created = await reserve(p, 'pay_at_store', { pickupRequestKey: key }); assert.equal(created.status, 201);
+    assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 0);
+    await Cart.updateOne({ user: buyer._id }, { $push: { items: { product: p._id, quantity: 1 } } });
+    const replay = await reserve(p, 'pay_at_store', { pickupRequestKey: key }); assert.equal(replay.status, 200); assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 1);
+    const original = CartService.removePurchasedItems; const count = await Order.countDocuments(); const stock = (await Product.findById(p._id))!.stock;
+    CartService.removePurchasedItems = async (...args) => { await original.apply(CartService, args); throw new Error('fixture cart cleanup failure'); };
+    try { const failed = await deliver(p); assert.notEqual(failed.status, 201); } finally { CartService.removePurchasedItems = original; }
+    assert.equal(await Order.countDocuments(), count); assert.equal((await Product.findById(p._id))!.stock, stock); assert.equal((await Cart.findOne({ user: buyer._id }))!.items.length, 1);
+});
+test('cart GET is private/no-store and never returns an old ETag after cart mutation', async () => {
+    const express = (await import('express')).default; const { CartController } = await import('../src/modules/cart/cart.controller.js');
+    const app = express(); app.get('/cart', (req: any, res) => { req.user = { userId: String(buyer._id) }; return CartController.getCart(req, res); });
+    const server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.once('listening', resolve));
+    try { const url = 'http://127.0.0.1:' + (server.address() as any).port + '/cart'; const before = await fetch(url); const etag = before.headers.get('etag')!; assert.match(before.headers.get('cache-control')!, /no-store/);
+        await Cart.updateOne({ user: buyer._id }, { $set: { items: [] } }); const after = await fetch(url, { headers: { 'If-None-Match': etag } }); assert.equal(after.status, 200); assert.equal((await after.json() as any).data.items.length, 0);
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('selected A+C checkout removes only those lines and unselected other seller does not block pickup', async () => {
+    const a = await product(); const b = await product(4, { seller: otherSeller._id }); const c = await product();
+    await Cart.findOneAndUpdate({ user: buyer._id }, { $set: { items: [{ product: a._id, quantity: 1 }, { product: b._id, quantity: 1 }, { product: c._id, quantity: 1 }] } }, { upsert: true });
+    const result = await reserve(a, 'pay_at_store', { items: [{ product: String(a._id), quantity: 1 }, { product: String(c._id), quantity: 1 }] });
+    assert.equal(result.status, 201); assert.equal(result.body.data.items.length, 2);
+    const cart = await Cart.findOne({ user: buyer._id }); assert.equal(cart!.items.length, 1); assert.equal(String(cart!.items[0].product), String(b._id));
+    assert.equal((await Product.findById(b._id))!.stock, 4);
+});

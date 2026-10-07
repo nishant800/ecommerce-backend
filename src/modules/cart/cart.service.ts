@@ -9,6 +9,37 @@ export interface CartSelection {
     optionValue?: string;
 }
 export class CartService {
+    // The caller's transaction binds this cleanup to creation/captured payment.
+    // Reuse the cart's exact line identity and subtract only purchased quantities.
+    static async removePurchasedItems(order: any, session: mongoose.ClientSession) {
+        if (order.cartClearedAt || order.checkoutSource === "buy_now" || order.orderStatus === "cancelled") return 0;
+        const cart = await Cart.findOne({ user: order.user }).session(session);
+        let removed = 0;
+        if (cart) {
+            for (const purchased of order.items) {
+                const quantity = purchased.quantity - (purchased.cancelledQuantity || 0);
+                if (quantity <= 0) continue;
+                let variantId = purchased.cartVariantId || "";
+                if (!variantId && purchased.variant?.sku) {
+                    const product = await Product.findById(purchased.product).session(session);
+                    const variant: any = product?.variants.find(v => v.sku === purchased.variant.sku);
+                    if (!variant) continue; // Never guess another variant for historical orders.
+                    variantId = String(variant._id);
+                }
+                const item = cart.items.find(i => this.sameItem(i, String(purchased.product), {
+                    variantId, optionType: purchased.variant?.optionType || "", optionValue: purchased.variant?.optionValue || "",
+                }));
+                if (!item) continue;
+                const taken = Math.min(item.quantity, quantity);
+                item.quantity -= taken;
+                removed += taken;
+            }
+            if (removed) { cart.items = cart.items.filter(i => i.quantity > 0); await cart.save({ session }); }
+        }
+        order.cartClearedAt = new Date();
+        await order.save({ session });
+        return removed;
+    }
     // =========================================
     // GET CART
     // =========================================

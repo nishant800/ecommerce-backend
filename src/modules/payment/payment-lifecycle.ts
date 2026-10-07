@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { EarningService } from "../payout/earning.service.js";
 import Order, { OrderStatus, PaymentStatus } from "../orders/order.model.js";
-import Cart from "../cart/cart.model.js";
+import { CartService } from "../cart/cart.service.js";
 import { NotificationService } from "../../notifications/notification.service.js";
 import { NotificationRecipientRole, NotificationType } from "../../notifications/notification.model.js";
 import { PAYMENT_RETRY_WINDOW_MS } from "../orders/payment-retry.js";
@@ -33,7 +33,11 @@ export async function confirmCapturedPayment(orderId: string, paymentId: string,
         { $in: ["$orderStatus", ["pending", "placed", "confirmed", "partially_cancelled"]] },
     ] };
     // Pipeline reads CURRENT cancellation state atomically, including a concurrent expiry.
-    const previous = await Order.findOneAndUpdate({ _id: orderId,
+    const session = await mongoose.startSession();
+    let previous: any;
+    let cartRemoved = 0;
+    try { await session.withTransaction(async () => {
+    previous = await Order.findOneAndUpdate({ _id: orderId,
         $or: [{ razorpayPaymentId: "" }, { razorpayPaymentId: null }, { razorpayPaymentId: paymentId }],
     }, [{ $set: {
         paymentStatus: PaymentStatus.SUCCESS, razorpayPaymentId: { $literal: paymentId },
@@ -52,15 +56,18 @@ export async function confirmCapturedPayment(orderId: string, paymentId: string,
             { $ifNull: ["$sellerReleasedAt", null] }, { $ifNull: ["$sellerReleasedAt", "$$NOW"] }] },
         __v: { $add: [{ $ifNull: ["$__v", 0] }, 1] },
         ...(eventId ? { paymentWebhookEventIds: { $setUnion: [{ $ifNull: ["$paymentWebhookEventIds", []] }, [eventId]] } } : {}),
-    } }], { new: false });
+    } }], { new: false, session });
     if (!previous) throw new Error("Conflicting payment reference");
+    const confirmed = await Order.findById(orderId).session(session);
+    if (confirmed && previous.paymentStatus !== PaymentStatus.SUCCESS && confirmed.fulfillmentType !== 'pickup') cartRemoved = await CartService.removePurchasedItems(confirmed, session);
+    }); } catch (error) { console.error('CAPTURED PAYMENT / CART TRANSACTION FAILED:', orderId); throw error; } finally { await session.endSession(); }
+    console.log('CART ITEMS REMOVED AFTER ORDER:', cartRemoved);
     if (previous.fulfillmentType === "pickup") {
         const { PickupService } = await import("../orders/pickup.service.js");
         await Order.updateOne({ _id: orderId }, { $set: { paidAt: new Date(), paymentMethod: "online" }, $inc: { __v: 1 } });
         await PickupService.expireFor({ _id: orderId });
         await Order.updateOne({ _id: orderId, "pickup.status": { $in: ["expired", "cancelled"] } }, { $set: { "pickup.refundRequired": true } });
     }
-    if (previous.fulfillmentType !== "pickup" && previous.paymentStatus !== PaymentStatus.SUCCESS) await Cart.updateOne({ user: previous.user }, { $set: { items: [] } });
     const { OrderService } = await import("../orders/order.service.js");
     await OrderService.reconcileCancelledPaidOrder(orderId);
     await releaseSellerNotifications(orderId);
