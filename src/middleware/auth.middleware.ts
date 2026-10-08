@@ -37,6 +37,7 @@ export const authenticate = async (
             return res.status(401).json({
                 success: false,
                 message: "Unauthorized",
+                code: "AUTH_REQUIRED",
             });
         }
         // ==========================================
@@ -48,13 +49,26 @@ export const authenticate = async (
             return res.status(401).json({
                 success: false,
                 message: "Unauthorized",
+                code: "AUTH_REQUIRED",
             });
         }
         // ==========================================
         // 3. Verify JWT
         // ==========================================
-        const decoded =
-            verifyAccessToken(token);
+        let decoded: ReturnType<typeof verifyAccessToken>;
+        try {
+            decoded = verifyAccessToken(token);
+        } catch (error) {
+            const name = error instanceof Error ? error.name : '';
+            if (['TokenExpiredError', 'JsonWebTokenError', 'NotBeforeError'].includes(name)) {
+                return res.status(401).json({
+                    success: false,
+                    message: name === 'TokenExpiredError' ? 'Token expired' : 'Invalid Token',
+                    code: name === 'TokenExpiredError' ? 'AUTH_TOKEN_EXPIRED' : 'AUTH_INVALID_TOKEN',
+                });
+            }
+            throw error;
+        }
         // ==========================================
         // 4. Find user in MongoDB
         // ==========================================
@@ -72,6 +86,7 @@ export const authenticate = async (
                 success: false,
                 message:
                     "User account no longer exists",
+                code: "AUTH_ACCOUNT_NOT_FOUND",
             });
         }
         // ==========================================
@@ -82,6 +97,7 @@ export const authenticate = async (
                 success: false,
                 message:
                     "This account has been deleted or is inactive",
+                code: "AUTH_ACCOUNT_INACTIVE",
             });
         }
         // ==========================================
@@ -124,9 +140,10 @@ export const authenticate = async (
             "❌ AUTHENTICATION FAILED:",
             error
         );
-        return res.status(401).json({
+        return res.status(503).json({
             success: false,
-            message: "Invalid Token",
+            message: "Authentication service temporarily unavailable",
+            code: "AUTH_SERVICE_UNAVAILABLE",
         });
     }
 };
